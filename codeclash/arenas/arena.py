@@ -142,10 +142,7 @@ class CodeArena(ABC):
         arena_file = Path(inspect.getfile(self.__class__))
         folder_path = arena_file.parent
         result = subprocess.run(
-            (
-                "export $(cat .env | xargs);"
-                f"docker build --no-cache -t {self.image_name} -f {folder_path}/{self.name}.Dockerfile ."
-            ),
+            f"docker build --no-cache -t {self.image_name} -f {folder_path}/{self.name}.Dockerfile .",
             shell=True,
             capture_output=True,
             text=True,

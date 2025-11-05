@@ -15,12 +15,13 @@
 
 CodeClash is a benchmark for evaluating AI systems on **goal-oriented software engineering**.
 
-Today's AI coding evals are *task*-oriented (e.g., HumanEval, SWE-bench).
+Today's AI coding evals are *task*-oriented (e.g.,
+<a href="https://github.com/openai/human-eval">HumanEval</a>, <a href="https://swebench.com">SWE-bench</a>).
 Models are given explicit instructions.
-We then verify implementations with unit tests.
+We then verify correctness with unit tests.
 
 But building software is fundamentally driven by goals ("improve user retention", "reduce costs", "increase revenue").
-Reaching our goals is a self-directed, iterative, and often competitive process.
+Reaching our goals via code is a self-directed, iterative, and often competitive process.
 To capture this dynamism of real software development, we introduce CodeClash!
 
 Check out our [arXiv paper](https://arxiv.org/abs/2511.00839) and [website](https://codeclash.ai/) for the full details!
@@ -34,6 +35,9 @@ $ cd CodeClash
 $ pip install -e '.[dev]'
 $ python main.py configs/test/battlesnake.yaml
 ```
+
+> [!TIP]
+> CodeClash requires Docker to create execution environments. CodeClash was developed and tested on Ubuntu 22.04.4 LTS.
 
 Once this works, you should be set up to run a real tournament!
 To run *Claude Sonnet 4.5* against *o3* in a *BattleSnake* tournament with *5 rounds* and *1000 competition simulations* per round, run:
