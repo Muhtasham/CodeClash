@@ -37,5 +37,19 @@ class DummyArena(CodeArena):
             stats.player_stats[player].score = score
 
     def validate_code(self, agent: Player) -> tuple[bool, str | None]:
-        # TODO: implement more checks
+        # Check that the submission file exists
+        file_check = agent.environment.execute(f"test -f {self.submission} && echo 'exists'")
+        if "exists" not in file_check["output"]:
+            return False, f"Submission file '{self.submission}' not found"
+
+        # Check that the file is not empty
+        file_content = agent.environment.execute(f"cat {self.submission}")["output"]
+        if not file_content.strip():
+            return False, f"Submission file '{self.submission}' is empty"
+
+        # Validate Python syntax
+        syntax_check = agent.environment.execute(f"python -m py_compile {self.submission}")
+        if syntax_check["returncode"] != 0:
+            return False, f"Python syntax error in '{self.submission}':\n{syntax_check['output']}"
+
         return True, None

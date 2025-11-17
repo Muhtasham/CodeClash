@@ -6,16 +6,20 @@ from pathlib import Path
 from queue import Queue
 from threading import Lock, Thread
 
+try:
+    import matplotlib.pyplot as plt
+    import numpy as np
+except ImportError:
+    plt = None
+    np = None
+
 from codeclash.agents.dummy_agent import Dummy
 from codeclash.agents.utils import GameContext
 from codeclash.arenas import get_game
-from codeclash.constants import DIR_WORK
+from codeclash.constants import DIR_WORK, RESULT_TIE
 from codeclash.tournaments.utils.git_utils import filter_git_diff
 from codeclash.utils.atomic_write import atomic_write
 from codeclash.utils.log import add_root_file_handler, get_logger
-
-# todo: add visualization code
-# todo: Should start from initial commit set in metadata rather than last commit
 
 
 class PvPMatrixEvaluator:
@@ -123,15 +127,22 @@ class PvPMatrixEvaluator:
         """Pre-initialize agents for all rounds for each player."""
         self.agent_pools = {}
 
+        # Get initial commit hashes for each player from tournament metadata
+        player_initial_commits = {}
+        for agent_metadata in self.metadata["agents"]:
+            player_initial_commits[agent_metadata["name"]] = agent_metadata.get("initial_commit_hash", "")
+
         for player_name in self.players:
             self.agent_pools[player_name] = {}
+            base_commit = player_initial_commits.get(player_name, "")
             for round_num in range(self.rounds + 1):
                 # Pre-load the diff for this round
                 patch = self._get_round_diff(player_name, round_num)
                 if patch is not None:
                     # Create agent for this round and player
                     agent = self._create_dummy_agent(player_name, f"_r{round_num}")
-                    agent.reset_and_apply_patch(filter_git_diff(patch))
+                    # Reset to initial commit before applying patch to ensure consistency
+                    agent.reset_and_apply_patch(filter_git_diff(patch), base_commit=base_commit)
                     self.agent_pools[player_name][round_num] = agent
                     self.logger.debug(f"Pre-initialized agent for {player_name} round {round_num}")
                 else:
@@ -304,6 +315,113 @@ class PvPMatrixEvaluator:
         self.end()
         return self.matrices
 
+    def generate_visualizations(self, output_dir: Path | None = None) -> list[Path]:
+        """Generate heatmap visualizations of the matrix results.
+
+        Args:
+            output_dir: Directory to save visualizations. Defaults to pvp_output_dir.
+
+        Returns:
+            List of paths to generated visualization files.
+
+        Raises:
+            ImportError: If matplotlib or numpy are not installed.
+        """
+        if plt is None or np is None:
+            msg = "Visualization dependencies not installed. Install with: pip install codeclash[viz]"
+            raise ImportError(msg)
+
+        if output_dir is None:
+            output_dir = self.pvp_output_dir
+        else:
+            output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        generated_files = []
+
+        for matrix_id, matrix_data in self.matrices.items():
+            self.logger.info(f"Generating visualization for {matrix_id}")
+
+            # Extract player names from matrix_id (format: "player1_vs_player2")
+            parts = matrix_id.split("_vs_")
+            if len(parts) != 2:
+                self.logger.warning(f"Skipping visualization for invalid matrix_id: {matrix_id}")
+                continue
+
+            player1, player2 = parts
+            n_rounds = self.rounds + 1
+
+            # Create win rate matrix - build using dict comprehension for efficiency
+            win_rate_matrix = np.full((n_rounds, n_rounds), np.nan)
+
+            # Populate matrix efficiently using dictionary structure
+            for i_str, row_data in matrix_data.items():
+                i = int(i_str)
+                for j_str, result in row_data.items():
+                    j = int(j_str)
+                    if result and "scores" in result:
+                        scores = result["scores"]
+
+                        # Find the actual agent names used (they have round suffixes like "p1_r0")
+                        # We need to match player names from the base names
+                        player1_actual = None
+                        player2_actual = None
+
+                        for score_key in scores.keys():
+                            if score_key == RESULT_TIE:
+                                continue
+                            # Match based on prefix (e.g., "p1_r0" starts with "p1")
+                            if score_key.startswith(player1 + "_"):
+                                player1_actual = score_key
+                            elif score_key.startswith(player2 + "_"):
+                                player2_actual = score_key
+
+                        # Only calculate win rate if we found both players
+                        if player1_actual and player2_actual:
+                            player1_score = scores.get(player1_actual, 0)
+                            player2_score = scores.get(player2_actual, 0)
+                            total_games = player1_score + player2_score + scores.get(RESULT_TIE, 0)
+                            if total_games > 0:
+                                win_rate_matrix[i, j] = player1_score / total_games
+
+            # Create heatmap
+            fig, ax = plt.subplots(figsize=(10, 8))
+            im = ax.imshow(win_rate_matrix, cmap="RdYlGn", vmin=0, vmax=1, aspect="auto")
+
+            # Set ticks and labels
+            ax.set_xticks(np.arange(n_rounds))
+            ax.set_yticks(np.arange(n_rounds))
+            ax.set_xticklabels([f"R{i}" for i in range(n_rounds)])
+            ax.set_yticklabels([f"R{i}" for i in range(n_rounds)])
+
+            # Add colorbar
+            cbar = plt.colorbar(im, ax=ax)
+            cbar.set_label(f"{player1} Win Rate", rotation=270, labelpad=20)
+
+            # Labels and title
+            ax.set_xlabel(f"{player2} Round")
+            ax.set_ylabel(f"{player1} Round")
+            ax.set_title(f"Matrix Evaluation: {player1} vs {player2}\nWin Rate Heatmap")
+
+            # Add text annotations - optimized using numpy to find valid cells
+            valid_cells = ~np.isnan(win_rate_matrix)
+            valid_indices = np.argwhere(valid_cells)
+
+            for i, j in valid_indices:
+                ax.text(j, i, f"{win_rate_matrix[i, j]:.2f}", ha="center", va="center", color="black", fontsize=8)
+
+            plt.tight_layout()
+
+            # Save figure
+            output_file = output_dir / f"matrix_{matrix_id}_heatmap.png"
+            plt.savefig(output_file, dpi=150, bbox_inches="tight")
+            plt.close()
+
+            generated_files.append(output_file)
+            self.logger.info(f"Saved visualization to {output_file}")
+
+        return generated_files
+
     def end(self):
         """Save metadata and clean up resources."""
         self._save()
@@ -320,10 +438,15 @@ class PvPMatrixEvaluator:
         self.logger.info("All game workers cleaned up")
 
 
-def main(pvp_output_dir: Path, n_repetitions: int = 3, max_workers: int = 4):
+def main(pvp_output_dir: Path, n_repetitions: int = 3, max_workers: int = 4, visualize: bool = False):
     """Main function to evaluate PvP tournament matrices."""
     evaluator = PvPMatrixEvaluator(pvp_output_dir, n_repetitions, max_workers)
-    return evaluator.evaluate_all_matrices()
+    matrices = evaluator.evaluate_all_matrices()
+
+    if visualize:
+        evaluator.generate_visualizations()
+
+    return matrices
 
 
 if __name__ == "__main__":
@@ -333,6 +456,12 @@ if __name__ == "__main__":
         "--repetitions", "-r", type=int, default=3, help="Number of repetitions per matrix cell (default: 3)"
     )
     parser.add_argument("--max-workers", "-w", type=int, default=4, help="Number of parallel game workers (default: 4)")
+    parser.add_argument(
+        "--visualize",
+        "-v",
+        action="store_true",
+        help="Generate heatmap visualizations of matrix results after evaluation",
+    )
 
     args = parser.parse_args()
-    main(args.pvp_output_dir, args.repetitions, args.max_workers)
+    main(args.pvp_output_dir, args.repetitions, args.max_workers, args.visualize)

@@ -53,6 +53,10 @@ docs = [
     "mkdocs-glightbox",
     "mkdocs-include-markdown-plugin",
 ]
+viz = [
+    "matplotlib",
+    "numpy",
+]
 
 [tool.setuptools.packages.find]
 include = ["codeclash*"]
