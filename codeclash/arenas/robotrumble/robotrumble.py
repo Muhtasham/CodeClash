@@ -76,13 +76,13 @@ NOTE: Please ensure that your code runs efficiently (under 60 seconds). Code tha
                 i_completed += 1
                 self.logger.info(f"Completed {i_completed} of {len(futures)} simulations")
 
-    def _get_winner_txt(self, output_file: str, agents: list[Player]) -> str:
+    def _get_winner_txt(self, output_file: str, agents: list[Player]) -> str | None:
         try:
             with open(output_file) as f:
                 lines = f.read().strip().split("\n")
         except Exception as e:
             self.logger.warning(f"Failed to read output from {output_file}: {e}")
-            return RESULT_TIE  # TODO: should this be a tie?
+            return None  # Skip this simulation - likely infrastructure issue
 
         # Get the last 2 lines which contain the game result (same as original)
         relevant_lines = lines[-2:] if len(lines) >= 2 else lines
@@ -94,15 +94,34 @@ NOTE: Please ensure that your code runs efficiently (under 60 seconds). Code tha
             return agents[1].name
         elif "it was a tie" in log_text:
             return RESULT_TIE
+
+        # No clear winner found - log full output for analysis
+        full_text = "\n".join(lines)
+        self.logger.warning(
+            f"No clear winner in {output_file}. Full output for analysis:\n"
+            f"{'='*60}\n{full_text}\n{'='*60}"
+        )
         return RESULT_TIE
 
     def _get_winner_json(self, output_file: str, agents: list[Player]) -> str:
         try:
             with open(output_file) as f:
                 data = json.load(f)
-        except json.JSONDecodeError:
-            self.logger.warning(f"Failed to parse JSON output from {output_file}")
-            return RESULT_TIE  # TODO: should this be a tie?
+        except json.JSONDecodeError as e:
+            # Log full malformed output for future analysis and error attribution
+            try:
+                with open(output_file) as f:
+                    raw_content = f.read()
+                self.logger.warning(
+                    f"Failed to parse JSON from {output_file}. JSONDecodeError: {e}\n"
+                    f"Full output for analysis:\n"
+                    f"{'='*60}\n{raw_content}\n{'='*60}"
+                )
+            except Exception as read_err:
+                self.logger.warning(f"Failed to read malformed output from {output_file}: {read_err}")
+            # Return TIE for malformed output - likely due to agent code issues
+            # This prevents buggy submissions from gaming the system by crashing
+            return RESULT_TIE
         if "winner" in data:
             if data["winner"] == "Blue":
                 return agents[0].name
@@ -119,21 +138,27 @@ NOTE: Please ensure that your code runs efficiently (under 60 seconds). Code tha
             if not output_file.exists():
                 self.logger.warning(f"Simulation {idx} not found, skipping")
                 continue
-            winners.append(
+            winner = (
                 self._get_winner_txt(output_file, agents)
                 if self.sim_ext == "txt"
                 else self._get_winner_json(output_file, agents)
             )
+            # Skip simulations that returned None (infrastructure errors)
+            if winner is not None:
+                winners.append(winner)
 
         # Count wins
         win_counts = Counter(winners)
 
-        # Find all winners with the maximum count
-        max_wins = max(win_counts.values())
-        overall_winners = [name for name, count in win_counts.items() if count == max_wins]
-
-        # Update stats
-        stats.winner = RESULT_TIE if len(overall_winners) > 1 else overall_winners[0]
+        # Handle edge case: all simulations skipped/failed
+        if not win_counts:
+            self.logger.warning("All simulations were skipped or failed, defaulting to TIE")
+            stats.winner = RESULT_TIE
+        else:
+            # Find all winners with the maximum count
+            max_wins = max(win_counts.values())
+            overall_winners = [name for name, count in win_counts.items() if count == max_wins]
+            stats.winner = RESULT_TIE if len(overall_winners) > 1 else overall_winners[0]
         stats.details.append(f"In this round, {agents[0].name} was Blue and {agents[1].name} was Red.")
         stats.scores = dict(win_counts)
         for player, score in win_counts.items():
