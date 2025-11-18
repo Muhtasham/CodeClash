@@ -128,24 +128,15 @@ def plot_throwaway_files_bar_chart(throwaway_df: pd.DataFrame):
     # Get sorted models alphabetically (reversed)
     sorted_df = throwaway_df.sort_values("player", ascending=False)
 
-    # Prepare data
-    models = []
-    root_values = []
-    non_root_values = []
-    colors = []
-
+    # Prepare data using vectorized operations
     root_col = "root_mean"
     non_root_col = "non_root_mean"
 
-    for _, row in sorted_df.iterrows():
-        model_key = row["player"]
-        display_name = MODEL_TO_DISPLAY_NAME.get(model_key, model_key)
-        color = MODEL_TO_COLOR.get(model_key, "#333333")
-
-        models.append(display_name)
-        root_values.append(row[root_col])
-        non_root_values.append(row[non_root_col])
-        colors.append(color)
+    # Use vectorized operations instead of iterrows()
+    models = sorted_df["player"].map(lambda x: MODEL_TO_DISPLAY_NAME.get(x, x)).tolist()
+    root_values = sorted_df[root_col].tolist()
+    non_root_values = sorted_df[non_root_col].tolist()
+    colors = sorted_df["player"].map(lambda x: MODEL_TO_COLOR.get(x, "#333333")).tolist()
 
     # Create stacked horizontal bar chart
     y_pos = np.arange(len(models))

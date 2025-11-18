@@ -37,7 +37,7 @@ df["won_to_lost"] = (df["current_round_win_rate"] > 0.5) & (df["next_round_win_r
 df["model_name"] = df["model_name"].str.split("/").str[1]
 df["edits_motivated_by_insight_not_logs"] = (~df["edits_motivated_by_logs"]) & df["edits_motivated_by_insights"]
 df["edits_tested_sim_and_unit"] = df["edits_tested_with_simulations"] & df["edits_validated_with_unittests"]
-df = df.query("model_name != opponent_model_name").copy()
+df = df.query("model_name != opponent_model_name")
 boolean_result_cols = [
     "edits_motivated_by_logs",
     "edits_motivated_by_insights",

@@ -141,7 +141,7 @@ class BigQuestions:
         response_data = BigQuestionsModelResponseSchema.model_validate_json(response["content"])
         response_data.pretty_print()
         response_data_json = {
-            "result": BigQuestionsModelResponseSchema.model_validate_json(response["content"]).model_dump(mode="json"),
+            "result": response_data.model_dump(mode="json"),
             "instance": instance.model_dump(mode="json"),
         }
 
@@ -149,17 +149,17 @@ class BigQuestions:
         logger.info(f"Evaluated instance {instance.instance_id}. Saved to {target_path} with key {self.data_id}")
 
     def _format_traj_str(self, messages: list[dict[str, Any]]) -> str:
-        trajectory_message_str = ""
+        parts = []
         for message in messages:
             content = message["content"]
             if isinstance(message["content"], list):
                 assert len(message["content"]) == 1
                 content = message["content"][0]["text"]
             if message["role"] == "assistant":
-                trajectory_message_str += "\n<action>\n" + extract_triple_backticks(content) + "\n</action>\n"
+                parts.append(f"\n<action>\n{extract_triple_backticks(content)}\n</action>\n")
             elif message["role"] == "user":
-                trajectory_message_str += content  # already enclosed in <output>
-        return trajectory_message_str
+                parts.append(content)  # already enclosed in <output>
+        return "".join(parts)
 
     def _get_messages(self, instance: Instance) -> list[dict[str, Any]]:
         trajectory_messages = json.loads(instance.trajectory_path.read_text())["messages"]
@@ -173,15 +173,20 @@ class BigQuestions:
             {"role": "user", "content": instance_message},
         ]
 
-    def _should_skip(self, target_path: Path, instance: Instance) -> bool:
+    def _get_existing_data(self, target_path: Path) -> dict | None:
+        """Read and parse JSON file, return None if doesn't exist or is empty."""
         if not target_path.exists():
-            logger.debug(f"Not skipping: {target_path} does not exist")
-            return False
+            return None
         content = target_path.read_text()
         if not content.strip():
-            logger.debug(f"Not skipping: {target_path} is empty")
+            return None
+        return json.loads(content)
+
+    def _should_skip(self, target_path: Path, instance: Instance) -> bool:
+        data = self._get_existing_data(target_path)
+        if data is None:
+            logger.debug(f"Not skipping: {target_path} does not exist or is empty")
             return False
-        data = json.loads(content)
         if self.data_id not in data:
             logger.debug(f"Not skipping: {self.data_id} not in {target_path}")
             return False
@@ -194,11 +199,7 @@ class BigQuestions:
         # atomic write with file lock in case other analyses are also writing
         with FileLock(target_path.with_suffix(".lock")):
             # read again if changed in the meantime
-            data = {}
-            if target_path.exists():
-                content = target_path.read_text()
-                if content.strip():
-                    data = json.loads(content)
+            data = self._get_existing_data(target_path) or {}
             data.setdefault(self.data_id, {})[instance.instance_id] = response_data
             target_path.write_text(json.dumps(data))
 

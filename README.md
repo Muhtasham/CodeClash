@@ -28,21 +28,21 @@ Check out our [arXiv paper](https://arxiv.org/abs/2511.00839) and [website](http
 
 ## 🏎️ Quick Start
 
-To start, follow these steps to set up CodeClash and run a test battle:
+To start, follow these steps to set up CodeClash with [uv](https://docs.astral.sh/uv/) and run a test battle:
 ```bash
 $ git clone git@github.com:CodeClash-ai/CodeClash.git
 $ cd CodeClash
-$ pip install -e '.[dev]'
-$ python main.py configs/test/battlesnake.yaml
+$ uv sync --dev          # install dependencies declared in pyproject.toml / uv.lock
+$ uv run main.py configs/test/battlesnake.yaml
 ```
 
 > [!TIP]
-> CodeClash requires Docker to create execution environments. CodeClash was developed and tested on Ubuntu 22.04.4 LTS.
+> Install [uv](https://docs.astral.sh/uv/getting-started/installation/) if you don't already have it. CodeClash also requires Docker to create execution environments and was developed and tested on Ubuntu 22.04.4 LTS.
 
 Once this works, you should be set up to run a real tournament!
 To run *Claude Sonnet 4.5* against *o3* in a *BattleSnake* tournament with *5 rounds* and *1000 competition simulations* per round, run:
 ```bash
-$ python main.py configs/examples/BattleSnake__claude-sonnet-4-5-20250929__o3__r5__s1000.yaml
+$ uv run main.py configs/examples/BattleSnake__claude-sonnet-4-5-20250929__o3__r5__s1000.yaml
 ```
 
 ## ⚔️ How It Works

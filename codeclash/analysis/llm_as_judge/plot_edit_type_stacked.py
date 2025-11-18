@@ -11,7 +11,7 @@ def main():
     # Load data
     df = pd.read_parquet(Path(__file__).parent / "aggregated_results.parquet")
     df["model_name"] = df["model_name"].str.split("/").str[1]
-    df = df.query("model_name != opponent_model_name").copy()
+    df = df.query("model_name != opponent_model_name")
 
     # Get unique models
     models = sorted(

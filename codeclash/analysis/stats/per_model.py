@@ -2,11 +2,28 @@ import argparse
 import json
 import re
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import TypedDict
 
 from tqdm.auto import tqdm
 
 from codeclash.constants import LOCAL_LOG_DIR
+
+
+class FailureStats(TypedDict):
+    """Statistics about failed commands in a trajectory."""
+
+    failed_commands: int
+    failed_command_types: dict[str, int]
+
+
+class TrajectoryResult(TypedDict):
+    """Result of processing a single trajectory file."""
+
+    model_name: str
+    steps: int
+    failure_stats: FailureStats
 
 
 class ModelProfile:
@@ -56,12 +73,21 @@ class TrajectoryAnalyzer:
             self.traj = {}
             self.messages = []
 
-    @property
-    def steps(self) -> int:
-        return sum([1 for x in self.traj["messages"] if x["role"] == "assistant"])
+        # Cache expensive computations
+        self._cached_steps = None
+        self._cached_failure_stats = None
 
     @property
-    def failure_stats(self) -> dict:
+    def steps(self) -> int:
+        if self._cached_steps is None:
+            self._cached_steps = sum(1 for x in self.messages if x["role"] == "assistant")
+        return self._cached_steps
+
+    @property
+    def failure_stats(self) -> FailureStats:
+        if self._cached_failure_stats is not None:
+            return self._cached_failure_stats
+
         failed_commands = 0
         failed_command_types = {}
         for i, message in enumerate(self.messages):
@@ -97,7 +123,29 @@ class TrajectoryAnalyzer:
                     failed_commands += 1
                     failed_command_types[cmd_type] = failed_command_types.get(cmd_type, 0) + 1
 
-        return {"failed_commands": failed_commands, "failed_command_types": failed_command_types}
+        self._cached_failure_stats = FailureStats(failed_commands=failed_commands, failed_command_types=failed_command_types)
+        return self._cached_failure_stats
+
+
+def process_trajectory_file(traj_file: Path, model_name: str) -> TrajectoryResult | None:
+    """Process a single trajectory file and return the results.
+
+    Args:
+        traj_file: Path to the trajectory JSON file to process.
+        model_name: Name of the model that generated this trajectory.
+
+    Returns:
+        TrajectoryResult containing model_name, steps, and failure_stats, or None if processing failed.
+    """
+    try:
+        analyzer = TrajectoryAnalyzer(traj_file)
+        return TrajectoryResult(
+            model_name=model_name,
+            steps=analyzer.steps,
+            failure_stats=analyzer.failure_stats,
+        )
+    except (json.JSONDecodeError, KeyError, FileNotFoundError):
+        return None
 
 
 def main(log_dir: str):
@@ -107,10 +155,12 @@ def main(log_dir: str):
         with open(game_log_folder / "metadata.json") as f:
             metadata = json.load(f)
         try:
-            p2m = {
-                x["name"]: x["config"]["model"]["model_name"].strip("@").split("/")[-1]
-                for x in metadata["config"]["players"]
-            }
+            # More efficient: avoid creating intermediate list from split
+            p2m = {}
+            for x in metadata["config"]["players"]:
+                model_name = x["config"]["model"]["model_name"].strip("@")
+                # Use rpartition instead of split to get last component
+                p2m[x["name"]] = model_name.rpartition("/")[-1]
         except KeyError:
             continue
 
@@ -119,19 +169,26 @@ def main(log_dir: str):
                 profiles[model] = ModelProfile(name=model)
             profiles[model].tournaments.append(game_log_folder.stem)
 
-        for name in p2m.keys():
-            traj_files = (game_log_folder / "players" / name).rglob("*.traj.json")
-            for traj_file in traj_files:
-                try:
-                    analyzer = TrajectoryAnalyzer(traj_file)
-                except (json.JSONDecodeError, KeyError, FileNotFoundError):
-                    continue
-                profiles[p2m[name]].steps.append(analyzer.steps)
+        # Process trajectory files in parallel using ThreadPoolExecutor
+        # Collect and submit tasks directly without intermediate list
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = []
+            for name in p2m.keys():
+                traj_files = (game_log_folder / "players" / name).rglob("*.traj.json")
+                for traj_file in traj_files:
+                    futures.append(executor.submit(process_trajectory_file, traj_file, p2m[name]))
 
-                failure_stats = analyzer.failure_stats
-                profiles[p2m[name]].failed_commands += failure_stats["failed_commands"]
-                for k, v in failure_stats["failed_command_types"].items():
-                    profiles[p2m[name]].failed_command_types[k] = profiles[p2m[name]].failed_command_types.get(k, 0) + v
+            # Process results as they complete
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    model_name = result["model_name"]
+                    profiles[model_name].steps.append(result["steps"])
+
+                    failure_stats = result["failure_stats"]
+                    profiles[model_name].failed_commands += failure_stats["failed_commands"]
+                    for k, v in failure_stats["failed_command_types"].items():
+                        profiles[model_name].failed_command_types[k] = profiles[model_name].failed_command_types.get(k, 0) + v
 
     sep = "=" * 40
     print(f"Models found: {len(profiles)}")

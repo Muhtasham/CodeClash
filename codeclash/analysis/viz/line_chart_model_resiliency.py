@@ -22,6 +22,7 @@ Insights:
 """
 
 import argparse
+import bisect
 import glob
 import json
 from collections import defaultdict
@@ -40,7 +41,26 @@ DEFICIT_RANGES = [
     (50, 100),  # 50%+ deficit
 ]
 
+# Pre-compute boundaries for efficient range lookup using bisect
+DEFICIT_BOUNDARIES = [min_d for min_d, _ in DEFICIT_RANGES] + [DEFICIT_RANGES[-1][1]]
+
 OUTPUT_FILE = ASSETS_DIR / "line_chart_model_resiliency.pdf"
+
+
+def find_deficit_range(deficit_percentage):
+    """Find the deficit range for a given percentage using binary search.
+
+    Returns the (min_deficit, max_deficit) tuple if found, None otherwise.
+    """
+    if deficit_percentage < 0 or deficit_percentage >= 100:
+        return None
+    # Use bisect to find the right boundary
+    idx = bisect.bisect_right(DEFICIT_BOUNDARIES, deficit_percentage) - 1
+    if 0 <= idx < len(DEFICIT_RANGES):
+        min_d, max_d = DEFICIT_RANGES[idx]
+        if min_d <= deficit_percentage < max_d:
+            return (min_d, max_d)
+    return None
 
 
 def load_tournament_metadata(metadata_path):
@@ -176,15 +196,15 @@ def analyze_tournament_directory(log_dir):
                 # Map player name to model name
                 losing_model = p2m.get(losing_player, losing_player)
 
-                for min_deficit, max_deficit in DEFICIT_RANGES:
-                    if min_deficit <= deficit_percentage < max_deficit:
-                        # Record attempt (lost this round)
-                        all_recovery_data[losing_model][(min_deficit, max_deficit)]["attempts"] += 1
+                # Use binary search to find the deficit range efficiently
+                deficit_range = find_deficit_range(deficit_percentage)
+                if deficit_range:
+                    # Record attempt (lost this round)
+                    all_recovery_data[losing_model][deficit_range]["attempts"] += 1
 
-                        # Record success if they won the next round
-                        if won_next_round:
-                            all_recovery_data[losing_model][(min_deficit, max_deficit)]["successes"] += 1
-                        break
+                    # Record success if they won the next round
+                    if won_next_round:
+                        all_recovery_data[losing_model][deficit_range]["successes"] += 1
 
             processed_tournaments += 1
 

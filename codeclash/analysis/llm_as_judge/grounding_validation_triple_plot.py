@@ -462,7 +462,7 @@ def main():
     df = pd.read_parquet(args.datafile)
 
     # Process model name and filter
-    df = df.query("model_name != opponent_model_name").copy()
+    df = df.query("model_name != opponent_model_name")
 
     # Map model names to display names
     df["model_name"] = df["model_name"].map(lambda x: MODEL_TO_DISPLAY_NAME.get(x, x))

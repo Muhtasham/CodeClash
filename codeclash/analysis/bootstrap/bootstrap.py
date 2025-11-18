@@ -1,6 +1,7 @@
 import random
 from collections import Counter
 from dataclasses import dataclass
+from itertools import combinations
 from typing import Literal
 
 random.seed(42)
@@ -139,6 +140,6 @@ class TwoPlayerBasedLeaderboard:
 
     def run(self, players: list[Player]):
         for tournament in self.tournaments:
-            for i_player in range(len(players)):
-                for j_player in range(i_player + 1, len(players)):
-                    tournament.run_tournament([players[i_player], players[j_player]])
+            # Use itertools.combinations for cleaner pairwise iteration
+            for player1, player2 in combinations(players, 2):
+                tournament.run_tournament([player1, player2])

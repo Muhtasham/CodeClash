@@ -114,7 +114,7 @@ class Hallucination(BigQuestions):
         response_data = HallucinationResponseSchema.model_validate_json(response["content"])
         response_data.pretty_print()
         response_data_json = {
-            "result": HallucinationResponseSchema.model_validate_json(response["content"]).model_dump(mode="json"),
+            "result": response_data.model_dump(mode="json"),
             "instance": instance.model_dump(mode="json"),
         }
 
@@ -123,7 +123,7 @@ class Hallucination(BigQuestions):
 
     def _format_traj_str(self, messages: list[dict[str, Any]]) -> str:
         """Format trajectory with step numbers and full agent output (not just actions)."""
-        trajectory_message_str = ""
+        parts = []
         step_index = 0
         for message in messages:
             content = message["content"]
@@ -131,11 +131,11 @@ class Hallucination(BigQuestions):
                 assert len(message["content"]) == 1
                 content = message["content"][0]["text"]
             if message["role"] == "assistant":
-                trajectory_message_str += f'\n<step index="{step_index}">\n{content}\n</step>\n'
+                parts.append(f'\n<step index="{step_index}">\n{content}\n</step>\n')
                 step_index += 1
             elif message["role"] == "user":
-                trajectory_message_str += content  # already enclosed in <output>
-        return trajectory_message_str
+                parts.append(content)  # already enclosed in <output>
+        return "".join(parts)
 
 
 if __name__ == "__main__":

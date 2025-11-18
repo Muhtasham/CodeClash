@@ -230,3 +230,5 @@ docs/visualization/*.jsonl
 docs/visualization/*.png
 docs/visualization/code_org
 docs/visualization/elo_plots
+CLAUDE.MD
+AGENTS.MD

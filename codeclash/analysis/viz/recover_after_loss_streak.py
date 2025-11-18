@@ -80,7 +80,8 @@ def calculate_streak_probabilities(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.D
     model_falldown_stats = defaultdict(lambda: defaultdict(lambda: {"opportunities": 0, "successes": 0}))
     model_overall_stats = defaultdict(lambda: {"total_rounds": 0, "wins": 0})
 
-    for _, row in df.iterrows():
+    # Use to_dict for much better performance than iterrows()
+    for row in df.to_dict(orient='records'):
         model_a = row["model_a"]
         model_b = row["model_b"]
 

@@ -355,12 +355,18 @@ class BradleyTerryFitter:
             -log(likelihood) + λ * Σ_i s_i^2 (MAP estimate with Gaussian prior)
         """
         assert len(wins) == len(pairs)
-        ll = 0.0
-        for k, (i, j) in enumerate(pairs):
-            diff = strengths[i] - strengths[j]
-            w_ij, w_ji = wins[k]
-            ll += w_ij * np.log(self._sigmoid(diff) + 1e-10)
-            ll += w_ji * np.log(self._sigmoid(-diff) + 1e-10)
+        # Handle empty pairs case (no matchups yet)
+        if not pairs:
+            regularization_term = self.regularization * np.sum(strengths**2)
+            return regularization_term
+        # Vectorized computation
+        pairs_array = np.array(pairs)
+        i_indices = pairs_array[:, 0]
+        j_indices = pairs_array[:, 1]
+        diffs = strengths[i_indices] - strengths[j_indices]
+        w_ij = wins[:, 0]
+        w_ji = wins[:, 1]
+        ll = np.sum(w_ij * np.log(self._sigmoid(diffs) + 1e-10) + w_ji * np.log(self._sigmoid(-diffs) + 1e-10))
         # Add L2 regularization: -λΣ_i s_i^2 becomes +λΣ_i s_i^2 in the objective
         regularization_term = self.regularization * np.sum(strengths**2)
         return -ll + regularization_term
@@ -368,17 +374,29 @@ class BradleyTerryFitter:
     def _hessian(self, strengths: np.ndarray, pairs: list[tuple[int, int]], wins: np.ndarray) -> np.ndarray:
         n = strengths.shape[0]
         H = np.zeros((n, n))
-        for k, (i, j) in enumerate(pairs):
-            diff = strengths[i] - strengths[j]
-            p = self._sigmoid(diff)
-            w_ij, w_ji = wins[k]
-            w = (w_ij + w_ji) * p * (1 - p)
-            if w == 0:
-                continue
-            H[i, i] += w
-            H[j, j] += w
-            H[i, j] -= w
-            H[j, i] -= w
+        # Handle empty pairs case (no matchups yet)
+        if not pairs:
+            # Just return regularization term on diagonal
+            H += 2 * self.regularization * np.eye(n)
+            return H
+        # Vectorized computation
+        pairs_array = np.array(pairs)
+        i_indices = pairs_array[:, 0]
+        j_indices = pairs_array[:, 1]
+        diffs = strengths[i_indices] - strengths[j_indices]
+        p = self._sigmoid(diffs)
+        w = (wins[:, 0] + wins[:, 1]) * p * (1 - p)
+        # Filter out zero weights
+        mask = w != 0
+        i_indices = i_indices[mask]
+        j_indices = j_indices[mask]
+        w = w[mask]
+        # Update diagonal elements using np.add.at for scatter-add
+        np.add.at(H, (i_indices, i_indices), w)
+        np.add.at(H, (j_indices, j_indices), w)
+        # Update off-diagonal elements
+        np.add.at(H, (i_indices, j_indices), -w)
+        np.add.at(H, (j_indices, i_indices), -w)
         # L2 regularization Hessian
         H += 2 * self.regularization * np.eye(n)
         return H
@@ -572,6 +590,9 @@ class BradleyTerryFitterPlots:
             # Convert to Elo ratings
             elos = {p: self.bt_to_elo(s) for p, s in zip(players, strengths)}
 
+            # Pre-build player to index mapping for O(1) lookups
+            player_to_idx = {p: i for i, p in enumerate(players)}
+
             # Create arrays aligned with player_order
             y_positions = []
             elo_values = []
@@ -582,7 +603,7 @@ class BradleyTerryFitterPlots:
                     elo_values.append(elos[player])
                     if sigma is not None:
                         # Map player's index in this game's ordering to σ
-                        idx = players.index(player)
+                        idx = player_to_idx[player]
                         sigma_values.append(float(sigma[idx]))
                     else:
                         sigma_values.append(0.0)
@@ -1354,8 +1375,10 @@ def write_latex_table(results: dict[str, dict], output_dir: Path) -> None:
         for game_name in games_in_table:
             if game_name in results:
                 game_result = results[game_name]
-                if player in game_result["players"]:
-                    idx = game_result["players"].index(player)
+                # Pre-build player to index mapping for O(1) lookups
+                game_player_to_idx = {p: i for i, p in enumerate(game_result["players"])}
+                if player in game_player_to_idx:
+                    idx = game_player_to_idx[player]
                     strength = game_result["strengths"][idx]
                     elo = BradleyTerryFitter.bt_to_elo(strength)
                     row_parts.append(rf"\eloSingleArenaResult{{{int(elo)}}}")
@@ -1401,6 +1424,9 @@ def write_website_results(results: dict[str, dict], output_dir: Path) -> None:
         # Convert Bradley-Terry strengths to Elo ratings
         elos = {p: BradleyTerryFitter.bt_to_elo(s) for p, s in zip(players, strengths)}
 
+        # Pre-build player to index mapping for O(1) lookups
+        player_to_idx = {p: i for i, p in enumerate(players)}
+
         # Sort by Elo (descending)
         sorted_players = sorted(elos.items(), key=lambda x: x[1], reverse=True)
 
@@ -1410,7 +1436,7 @@ def write_website_results(results: dict[str, dict], output_dir: Path) -> None:
             entry = {"rank": rank + 1, "model": MODEL_TO_DISPLAY_NAME.get(player, player), "elo": int(round(elo))}
             # Add confidence interval if available
             if elo_std is not None:
-                player_idx = players.index(player)
+                player_idx = player_to_idx[player]
                 entry["elo_std"] = int(round(elo_std[player_idx]))
             board.append(entry)
 
@@ -1505,6 +1531,9 @@ def write_latex_table_plain(results: dict[str, dict], output_dir: Path) -> None:
     lines.append(" & ".join(header_parts) + r" \\")
     lines.append(r"\midrule")
 
+    # Pre-build player to index mapping for ALL game for O(1) lookups
+    all_player_to_idx = {p: i for i, p in enumerate(all_result["players"])}
+
     for player, all_elo in sorted_players:
         display_name = MODEL_TO_DISPLAY_NAME.get(player, player)
         row_parts = [display_name.replace("_", r"\_")]
@@ -1512,8 +1541,10 @@ def write_latex_table_plain(results: dict[str, dict], output_dir: Path) -> None:
         for game_name in games_in_table:
             if game_name in results:
                 game_result = results[game_name]
-                if player in game_result["players"]:
-                    idx = game_result["players"].index(player)
+                # Pre-build player to index mapping for this game for O(1) lookups
+                game_player_to_idx = {p: i for i, p in enumerate(game_result["players"])}
+                if player in game_player_to_idx:
+                    idx = game_player_to_idx[player]
                     strength = game_result["strengths"][idx]
                     elo = BradleyTerryFitter.bt_to_elo(strength)
                     if has_uncertainties and "elo_std" in game_result:
@@ -1527,7 +1558,7 @@ def write_latex_table_plain(results: dict[str, dict], output_dir: Path) -> None:
                 row_parts.append("--")
 
         if has_uncertainties:
-            all_idx = all_result["players"].index(player)
+            all_idx = all_player_to_idx[player]
             all_sigma = all_result["elo_std"][all_idx]
             row_parts.append(rf"$\mathbf{{{int(all_elo)} \pm {int(all_sigma)}}}$")
         else:
