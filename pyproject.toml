@@ -32,6 +32,8 @@ dependencies = [
     "unidiff",
     "trueskill",
     "cdifflib",
+    "update>=0.0.1",
+    "prime>=0.5.34",
 ]
 
 [project.optional-dependencies]
@@ -205,3 +207,8 @@ line-ending = "auto"
 [tool.typos.default.extend-words]
 # Don't correct the surname "Teh"
 ba = "ba"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14.8",
+]

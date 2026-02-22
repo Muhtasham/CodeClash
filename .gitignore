@@ -230,3 +230,22 @@ docs/visualization/*.jsonl
 docs/visualization/*.png
 docs/visualization/code_org
 docs/visualization/elo_plots
+.DS_Store
+
+# Prime RL experiment outputs
+artifacts/
+outputs/
+environments/robotrumble_prime/outputs/
+environments/robotrumble_prime/.prime/
+
+# Prime RL configs and ephemeral docs
+configs/prime/
+configs/ablations/vs_human/generated_groq/
+docs/prime/
+docs/usage/prime_robotrumble_*.md
+
+# Prime RL scripts and one-off files
+robot.py
+scripts/prime_gatekeeper_v8.*
+scripts/queue_prime_rl_runs.sh
+scripts/run_prime_*.sh

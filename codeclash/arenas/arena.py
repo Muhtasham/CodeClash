@@ -114,6 +114,10 @@ class CodeArena(ABC):
     def image_name(self) -> str:
         return f"codeclash/{self.name.lower()}"
 
+    @property
+    def docker_platform(self) -> str | None:
+        return self.game_config.get("docker_platform")
+
     def build_image(self):
         """
         Build a Docker image for the game using the Dockerfile in the codebase.
@@ -141,8 +145,9 @@ class CodeArena(ABC):
         # NOTE: Assuming Dockerfile is declared in same directory as the arena.
         arena_file = Path(inspect.getfile(self.__class__))
         folder_path = arena_file.parent
+        platform_arg = f"--platform={self.docker_platform} " if self.docker_platform else ""
         result = subprocess.run(
-            f"docker build --no-cache -t {self.image_name} -f {folder_path}/{self.name}.Dockerfile .",
+            f"docker build --no-cache {platform_arg}-t {self.image_name} -f {folder_path}/{self.name}.Dockerfile .",
             shell=True,
             capture_output=True,
             text=True,
@@ -181,10 +186,11 @@ class CodeArena(ABC):
     def get_environment(self, branch_name: str | None = None) -> DockerEnvironment:
         """Get docker container ID with the game code installed."""
         self.build_image()
+        run_args = []
+        if self.docker_platform:
+            run_args.extend(["--platform", self.docker_platform])
         if not self._keep_containers:
-            run_args = ["--rm"]
-        else:
-            run_args = []
+            run_args.append("--rm")
         environment = DockerEnvironment(
             image=self.image_name,
             cwd=str(DIR_WORK),
