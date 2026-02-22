@@ -1,0 +1,29 @@
+[project]
+name = "robotrumble_prime"
+description = "Prime Lab starter environment for RobotRumble code-generation RL/eval"
+tags = ["robotrumble", "codegen", "train", "eval"]
+version = "0.7.16"
+requires-python = ">=3.10"
+dependencies = [
+    "verifiers>=0.1.9.post3",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+include = [
+    "robotrumble_prime.py",
+    "robotrumble_prime_canonical.py",
+    "ladder_runner.py",
+    "prime_pytest_plugin.py",
+    "pyproject.toml",
+]
+
+[project.entry-points.pytest11]
+robotrumble_prime_integration = "prime_pytest_plugin"
+
+[tool.verifiers.eval]
+num_examples = 20
+rollouts_per_example = 2
