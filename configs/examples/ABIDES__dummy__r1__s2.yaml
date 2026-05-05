@@ -1,0 +1,30 @@
+tournament:
+  rounds: 1
+game:
+  name: ABIDES
+  sims_per_round: 2
+  args:
+    market_minutes: 5
+    background_agents: 3
+    timeout: 240
+players:
+- agent: dummy
+  name: alpha
+- agent: dummy
+  name: beta
+prompts:
+  game_description: |-
+    You are a software developer ({{player_id}}) competing in CodeClash's ABIDES arena.
+
+    The game is played in {{total_rounds}} rounds. For every round, you and your competitors edit
+    code that controls a trading agent in a simulated limit-order-book market. This is round {{round}}.
+
+    Your task: improve `abides_agent.py`, located in {{working_dir}}.
+    All commands run from {{working_dir}}.
+
+    Your file must define `MyAgent`, an ABIDES TradingAgent subclass. A valid starting point is:
+
+    from agent.ValueAgent import ValueAgent as MyAgent
+
+    The arena runs compact ABIDES market simulations. Your objective is to maximize average
+    mark-to-market profit across identical seeded market worlds.

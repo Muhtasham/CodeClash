@@ -1,0 +1,14 @@
+# ABIDES CodeClash Workspace
+
+Edit `abides_agent.py`.
+
+Your file must define `MyAgent`, an ABIDES trading-agent class. A safe starting point is:
+
+```python
+from agent.ValueAgent import ValueAgent as MyAgent
+```
+
+The arena runs compact ABIDES market simulations and scores agents by average mark-to-market profit
+across identical seeded market worlds.
+Some upstream ABIDES agents keep default behavior behind exact-class checks. If you subclass one of
+those agents, override the relevant hooks instead of relying on an empty subclass.
