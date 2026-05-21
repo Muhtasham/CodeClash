@@ -12,6 +12,7 @@ class TestABIDESValidation:
     def test_valid_agent(self, mock_player_factory):
         arena = ABIDESArena.__new__(ABIDESArena)
         arena.submission = "abides_agent.py"
+        arena.config = {"game": {"args": {"validation_timeout": 3}}}
         player = mock_player_factory(
             name="Alice",
             files={"abides_agent.py": "from agent.ValueAgent import ValueAgent as MyAgent\n"},
@@ -35,9 +36,41 @@ class TestABIDESValidation:
             "spec.loader.exec_module(module)"
         )
 
+    def test_validation_import_uses_timeout(self, mock_player_factory):
+        arena = ABIDESArena.__new__(ABIDESArena)
+        arena.submission = "abides_agent.py"
+        arena.config = {"game": {"args": {"validation_timeout": 7}}}
+
+        class CapturingEnvironment(MockEnvironment):
+            def __init__(self):
+                super().__init__(
+                    files={"abides_agent.py": "from agent.ValueAgent import ValueAgent as MyAgent\n"},
+                    command_outputs={
+                        "python -m py_compile abides_agent.py": {"output": "", "returncode": 0},
+                        "python - <<'PY'": {"output": "", "returncode": 0},
+                    },
+                )
+                self.timeouts = []
+
+            def execute(self, cmd, cwd=None, timeout=None):
+                self.timeouts.append((cmd, timeout))
+                return super().execute(cmd, cwd=cwd, timeout=timeout)
+
+        player = MockPlayer("Alice", CapturingEnvironment())
+
+        valid, error = arena.validate_code(player)
+
+        assert valid is True
+        assert error is None
+        import_timeout = next(
+            timeout for cmd, timeout in player.environment.timeouts if cmd.startswith("python - <<'PY'")
+        )
+        assert import_timeout == 7
+
     def test_missing_myagent(self, mock_player_factory):
         arena = ABIDESArena.__new__(ABIDESArena)
         arena.submission = "abides_agent.py"
+        arena.config = {"game": {}}
         player = mock_player_factory(
             name="Alice",
             files={"abides_agent.py": "class OtherAgent:\n    pass\n"},
@@ -57,6 +90,7 @@ class TestABIDESValidation:
     def test_import_failure(self, mock_player_factory):
         arena = ABIDESArena.__new__(ABIDESArena)
         arena.submission = "abides_agent.py"
+        arena.config = {"game": {}}
         player = mock_player_factory(
             name="Alice",
             files={"abides_agent.py": "class MyAgent:\n    pass\n"},
@@ -133,6 +167,23 @@ class TestABIDESResults:
         assert stats.scores == {"Alice": CRASH_SCORE, "Bob": -5.0}
         assert "missing ABIDES score" in stats.details[0]
 
+    def test_missing_results_file_penalizes_all_players(self, tmp_log_dir):
+        arena = ABIDESArena.__new__(ABIDESArena)
+        arena.log_local = tmp_log_dir
+        arena.logger = type("Logger", (), {"error": lambda self, msg: None})()
+
+        agents = [MockPlayer("Alice"), MockPlayer("Bob")]
+        stats = RoundStats(round_num=1, agents=agents)
+
+        arena.get_results(agents, 1, stats)
+
+        assert stats.winner == RESULT_TIE
+        assert stats.scores == {"Alice": CRASH_SCORE, "Bob": CRASH_SCORE}
+        assert stats.player_stats["Alice"].score == CRASH_SCORE
+        assert stats.player_stats["Bob"].score == CRASH_SCORE
+        assert len(stats.details) == 2
+        assert "missing ABIDES result file" in stats.details[0]
+
 
 class TestABIDESExecution:
     def test_execute_round_uses_nested_game_args(self):
@@ -144,6 +195,7 @@ class TestABIDESExecution:
                 "args": {
                     "market_minutes": 11,
                     "background_agents": 13,
+                    "player_timeout": 19,
                     "timeout": 17,
                 },
             }
@@ -169,6 +221,7 @@ class TestABIDESExecution:
         assert "--sims 5" in cmd
         assert "--market-minutes 11" in cmd
         assert "--background-agents 13" in cmd
+        assert "--player-timeout 19" in cmd
         assert "--output /logs/abides_results.json" in cmd
         assert "--agent Alice=/Alice/abides_agent.py" in cmd
         assert "--agent Bob=/Bob/abides_agent.py" in cmd

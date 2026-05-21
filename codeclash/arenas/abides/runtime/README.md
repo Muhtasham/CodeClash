@@ -10,5 +10,7 @@ from agent.ValueAgent import ValueAgent as MyAgent
 
 The arena runs compact ABIDES market simulations and scores agents by average mark-to-market profit
 across identical seeded market worlds.
+Scores are computed from exchange execution messages, so editing `self.holdings` directly does not
+create scored profit.
 Some upstream ABIDES agents keep default behavior behind exact-class checks. If you subclass one of
 those agents, override the relevant hooks instead of relying on an empty subclass.

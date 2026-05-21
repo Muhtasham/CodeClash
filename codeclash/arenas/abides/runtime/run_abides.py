@@ -2,9 +2,12 @@ import argparse
 import contextlib
 import importlib.util
 import json
+import multiprocessing as mp
 import os
+import queue
 import random
 import re
+import sys
 import tempfile
 import traceback
 from pathlib import Path
@@ -42,11 +45,17 @@ def safe_module_name(player_name: str, sim_idx: int | None = None) -> str:
 
 
 def load_agent_class(player_name: str, path: str, *, sim_idx: int | None = None):
+    agent_dir = str(Path(path).resolve().parent)
+    sys.path.insert(0, agent_dir)
     spec = importlib.util.spec_from_file_location(safe_module_name(player_name, sim_idx), path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Could not load module spec from {path}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        with contextlib.suppress(ValueError):
+            sys.path.remove(agent_dir)
     if not hasattr(module, "MyAgent"):
         raise RuntimeError(f"{path} does not define MyAgent")
     agent_class = module.MyAgent
@@ -178,6 +187,7 @@ def make_world_agents(agent_classes: dict[str, type], *, sim_idx: int, market_mi
         agent_id += 1
 
     player_agents = {}
+    player_ids = {}
     player_names = list(agent_classes.keys())
     if player_names:
         offset = sim_idx % len(player_names)
@@ -186,14 +196,33 @@ def make_world_agents(agent_classes: dict[str, type], *, sim_idx: int, market_mi
             agent = make_player_agent(agent_classes[player_name], player_name, agent_id)
             agents.append(agent)
             player_agents[player_name] = agent
+            player_ids[agent_id] = player_name
             agent_id += 1
 
     for agent in agents:
         agent.log_to_file = False
 
+    ledgers = {player: {"CASH": STARTING_CASH, SYMBOL: 0} for player in player_agents}
+    original_exchange_send = exchange.sendMessage
+
+    def scored_exchange_send(*args, **kwargs):
+        recipient_id = args[0] if args else kwargs.get("recipientID", kwargs.get("recipient_id"))
+        msg = args[1] if len(args) > 1 else kwargs.get("msg")
+        player = player_ids.get(recipient_id)
+        if player and getattr(msg, "body", {}).get("msg") == "ORDER_EXECUTED":
+            order = msg.body["order"]
+            quantity = int(order.quantity)
+            signed_quantity = quantity if order.is_buy_order else -quantity
+            ledgers[player][SYMBOL] += signed_quantity
+            ledgers[player]["CASH"] -= signed_quantity * int(order.fill_price)
+        return original_exchange_send(*args, **kwargs)
+
+    exchange.sendMessage = scored_exchange_send
+
     return {
         "agents": agents,
         "player_agents": player_agents,
+        "ledgers": ledgers,
         "exchange": exchange,
         "historical_date": historical_date,
         "mkt_close": mkt_close,
@@ -201,7 +230,7 @@ def make_world_agents(agent_classes: dict[str, type], *, sim_idx: int, market_mi
     }
 
 
-def score_player(agent: TradingAgent, final_price: int) -> tuple[float, dict]:
+def score_player(agent: TradingAgent, ledger: dict[str, int], final_price: int) -> tuple[float, dict]:
     if getattr(agent, "_codeclash_error", None):
         return CRASH_SCORE, {
             "status": "error",
@@ -210,8 +239,8 @@ def score_player(agent: TradingAgent, final_price: int) -> tuple[float, dict]:
         }
 
     try:
-        cash = int(agent.holdings.get("CASH", 0))
-        shares = int(agent.holdings.get(SYMBOL, 0))
+        cash = int(ledger.get("CASH", 0))
+        shares = int(ledger.get(SYMBOL, 0))
         score = float(cash + shares * final_price - STARTING_CASH)
     except Exception as exc:
         return CRASH_SCORE, {
@@ -259,7 +288,8 @@ def run_player_market(
 
     final_price = int(world["exchange"].order_books[SYMBOL].last_trade)
     agent = world["player_agents"][player]
-    score, score_detail = score_player(agent, final_price)
+    ledger = world["ledgers"][player]
+    score, score_detail = score_player(agent, ledger, final_price)
     return {
         "score": score,
         "detail": {
@@ -272,33 +302,108 @@ def run_player_market(
     }
 
 
-def run_market(agent_paths: dict[str, str], *, sim_idx: int, market_minutes: int, background_agents: int) -> dict:
-    scores = {}
-    details = []
-    for player, path in agent_paths.items():
-        try:
-            agent_class = load_agent_class(player, path, sim_idx=sim_idx)
-            result = run_player_market(
-                player,
-                agent_class,
-                sim_idx=sim_idx,
-                market_minutes=market_minutes,
-                background_agents=background_agents,
+def run_player_market_worker(
+    result_queue: mp.Queue,
+    player: str,
+    path: str,
+    *,
+    sim_idx: int,
+    market_minutes: int,
+    background_agents: int,
+) -> None:
+    try:
+        agent_class = load_agent_class(player, path, sim_idx=sim_idx)
+        result_queue.put(
+            run_player_market(
+                player, agent_class, sim_idx=sim_idx, market_minutes=market_minutes, background_agents=background_agents
             )
-            scores[player] = result["score"]
-            details.append(result["detail"])
-        except Exception as exc:
-            scores[player] = CRASH_SCORE
-            details.append(
-                {
+        )
+    except BaseException as exc:
+        result_queue.put(
+            {
+                "score": CRASH_SCORE,
+                "detail": {
                     "sim": sim_idx,
                     "player": player,
                     "score": CRASH_SCORE,
                     "status": "error",
                     "error": f"{type(exc).__name__}: {exc}",
                     "traceback": traceback.format_exc(limit=5),
-                }
-            )
+                },
+            }
+        )
+
+
+def run_player_market_isolated(
+    player: str,
+    path: str,
+    *,
+    sim_idx: int,
+    market_minutes: int,
+    background_agents: int,
+    player_timeout: int,
+) -> dict:
+    ctx = mp.get_context("spawn")
+    result_queue = ctx.Queue()
+    process = ctx.Process(
+        target=run_player_market_worker,
+        args=(result_queue, player, path),
+        kwargs={
+            "sim_idx": sim_idx,
+            "market_minutes": market_minutes,
+            "background_agents": background_agents,
+        },
+    )
+    process.start()
+    process.join(player_timeout)
+    if process.is_alive():
+        process.terminate()
+        process.join(2)
+        if process.is_alive():
+            process.kill()
+            process.join()
+        return {
+            "score": CRASH_SCORE,
+            "detail": {
+                "sim": sim_idx,
+                "player": player,
+                "score": CRASH_SCORE,
+                "status": "error",
+                "error": f"player simulation exceeded {player_timeout}s timeout",
+            },
+        }
+
+    try:
+        return result_queue.get_nowait()
+    except queue.Empty:
+        return {
+            "score": CRASH_SCORE,
+            "detail": {
+                "sim": sim_idx,
+                "player": player,
+                "score": CRASH_SCORE,
+                "status": "error",
+                "error": f"player simulation exited with code {process.exitcode} and no result",
+            },
+        }
+
+
+def run_market(
+    agent_paths: dict[str, str], *, sim_idx: int, market_minutes: int, background_agents: int, player_timeout: int
+) -> dict:
+    scores = {}
+    details = []
+    for player, path in agent_paths.items():
+        result = run_player_market_isolated(
+            player,
+            path,
+            sim_idx=sim_idx,
+            market_minutes=market_minutes,
+            background_agents=background_agents,
+            player_timeout=player_timeout,
+        )
+        scores[player] = result["score"]
+        details.append(result["detail"])
 
     return {"scores": scores, "details": details}
 
@@ -320,6 +425,7 @@ def main() -> None:
     parser.add_argument("--sims", type=int, default=3)
     parser.add_argument("--market-minutes", type=int, default=5)
     parser.add_argument("--background-agents", type=int, default=3)
+    parser.add_argument("--player-timeout", type=int, default=60)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 
@@ -329,6 +435,8 @@ def main() -> None:
         parser.error("--market-minutes must be at least 1")
     if args.background_agents < 0:
         parser.error("--background-agents cannot be negative")
+    if args.player_timeout < 1:
+        parser.error("--player-timeout must be at least 1")
 
     agent_names = [name for name, _ in args.agent]
     if len(agent_names) != len(set(agent_names)):
@@ -345,6 +453,7 @@ def main() -> None:
                 sim_idx=sim_idx,
                 market_minutes=args.market_minutes,
                 background_agents=args.background_agents,
+                player_timeout=args.player_timeout,
             )
         except Exception as exc:
             result = {

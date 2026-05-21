@@ -6,6 +6,8 @@ game:
   args:
     market_minutes: 5
     background_agents: 3
+    validation_timeout: 10
+    player_timeout: 60
     timeout: 240
 players:
 - agent: dummy

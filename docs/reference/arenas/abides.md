@@ -54,6 +54,8 @@ game:
   args:
     market_minutes: 5
     background_agents: 3
+    validation_timeout: 10
+    player_timeout: 60
     timeout: 240
 players:
   - agent: dummy
@@ -67,7 +69,8 @@ players:
 The arena runs `sims_per_round` independent ABIDES market seeds. For each seed, every submitted
 CodeClash trading agent is evaluated in its own matching ABIDES market world with an exchange, a
 market maker, and background zero-intelligence traders. The final CodeClash score is the player's
-average mark-to-market profit across simulations.
+average mark-to-market profit across simulations. Scoring is derived from exchange execution
+messages rather than mutable fields on the submitted agent object.
 
 ## Smoke Test
 

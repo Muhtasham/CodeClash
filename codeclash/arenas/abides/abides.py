@@ -29,6 +29,8 @@ objective is to maximize average mark-to-market profit across all simulations in
         "sims_per_round": 3,
         "market_minutes": 5,
         "background_agents": 3,
+        "validation_timeout": 10,
+        "player_timeout": 60,
         "timeout": 240,
     }
 
@@ -68,7 +70,8 @@ objective is to maximize average mark-to-market profit across all simulations in
             "    log_orders=False,\n"
             "    random_state=np.random.RandomState(seed=1),\n"
             ")\n"
-            "PY"
+            "PY",
+            timeout=int(self._game_arg("validation_timeout")),
         )
         if import_check["returncode"] != 0:
             return (
@@ -87,11 +90,13 @@ objective is to maximize average mark-to-market profit across all simulations in
             "python",
             "run_abides.py",
             "--sims",
-            str(self.game_config.get("sims_per_round", self.default_args["sims_per_round"])),
+            str(self._game_arg("sims_per_round")),
             "--market-minutes",
             str(self._game_arg("market_minutes")),
             "--background-agents",
             str(self._game_arg("background_agents")),
+            "--player-timeout",
+            str(self._game_arg("player_timeout")),
             "--output",
             str(self.log_env / RESULTS_JSON),
             *agent_args,
@@ -109,9 +114,20 @@ objective is to maximize average mark-to-market profit across all simulations in
         if not result_file.exists():
             self.logger.error(f"Missing result file: {result_file}")
             stats.winner = RESULT_TIE
+            stats.scores = {agent.name: CRASH_SCORE for agent in agents}
             for agent in agents:
-                stats.scores[agent.name] = 0.0
-                stats.player_stats[agent.name].score = 0.0
+                stats.player_stats[agent.name].score = CRASH_SCORE
+                stats.details.append(
+                    json.dumps(
+                        {
+                            "player": agent.name,
+                            "score": CRASH_SCORE,
+                            "status": "error",
+                            "error": f"missing ABIDES result file: {result_file}",
+                        },
+                        sort_keys=True,
+                    )
+                )
             return
 
         with open(result_file) as f:
