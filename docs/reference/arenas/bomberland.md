@@ -67,13 +67,29 @@ player receives both starting sides for paired seeds. Each player receives an av
 from surviving health, surviving units, enemy damage, kills, destroyed blocks, invalid actions, and
 agent runtime errors.
 
-Smoke command:
+## Smoke Test
+
+From the repository root, run the dummy-player example:
 
 ```bash
 uv run python main.py configs/examples/Bomberland__dummy__r1__s2.yaml -o /tmp/codeclash-bomberland-smoke
 ```
 
-The arena writes `bomberland_results.json` with this shape:
+Use a fresh `-o` directory when rerunning the smoke check.
+
+Expected shape:
+
+- the command exits with status 0;
+- both players pass submission validation;
+- stdout includes `In round 0, the winner is ...` and `In round 1, the winner is ...`;
+- each round summary contains floating-point average scores for `alpha` and `beta`;
+- per-simulation details include `scores`, `stats`, `alive_units`, `alive_hp`, `ticks`, and
+  `winner` fields;
+- per-player `stats` include `agent_errors` and `invalid_actions`;
+- the output directory contains `metadata.json`, `game.log`, `tournament.log`, and
+  `rounds/round_0.tar.gz` / `rounds/round_1.tar.gz`.
+
+The arena writes `bomberland_results.json` inside each round log with this shape:
 
 ```json
 {
@@ -82,6 +98,26 @@ The arena writes `bomberland_results.json` with this shape:
   "sims": 2,
   "details": ["... per-simulation JSON strings ..."]
 }
+```
+
+A representative `metadata.json` round contains a `scores` object with one floating-point average
+score per player:
+
+```json
+"scores": {
+  "alpha": 330.0,
+  "beta": 330.0
+}
+```
+
+Exact values can change with arena configuration; the smoke check is meant to verify the
+Docker/runtime adapter path, player-name mapping, paired starting sides, and score/log artifact
+shape.
+
+The exact tournament directory name includes a timestamp, so inspect the metadata with:
+
+```bash
+find /tmp/codeclash-bomberland-smoke -maxdepth 3 -name metadata.json -print
 ```
 
 --8<-- "docs/_footer.md"

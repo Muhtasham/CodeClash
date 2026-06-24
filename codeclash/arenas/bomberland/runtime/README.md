@@ -26,6 +26,11 @@ Smoke command from the repository root:
 uv run python main.py configs/examples/Bomberland__dummy__r1__s2.yaml -o /tmp/codeclash-bomberland-smoke
 ```
 
+Use a fresh `-o` directory when rerunning the smoke check. Expected output:
+the command exits with status 0, both players pass validation, each round
+summary contains floating-point scores, and the output directory contains
+`metadata.json`, `game.log`, `tournament.log`, and compressed round logs.
+
 Expected result shape:
 
 ```json
@@ -36,3 +41,7 @@ Expected result shape:
   "details": ["... per-simulation JSON strings ..."]
 }
 ```
+
+Each detail entry is a JSON string with `scores`, `stats`, `alive_units`,
+`alive_hp`, `ticks`, and `winner` fields. Per-player `stats` include
+`agent_errors` and `invalid_actions`.
