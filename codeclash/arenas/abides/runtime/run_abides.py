@@ -83,6 +83,68 @@ def make_player_agent(agent_class: type, player_name: str, agent_id: int):
     return guard_player_agent(agent)
 
 
+def is_recorded_execution(exchange: ExchangeAgent, order) -> bool:
+    order_book = getattr(exchange, "order_books", {}).get(getattr(order, "symbol", None))
+    if order_book is None:
+        return False
+
+    order_id = getattr(order, "order_id", None)
+    try:
+        quantity = int(order.quantity)
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+    for history_window in getattr(order_book, "history", []):
+        order_record = history_window.get(order_id)
+        if not order_record:
+            continue
+        for _timestamp, transaction_quantity in order_record.get("transactions", []):
+            try:
+                if int(transaction_quantity) == quantity:
+                    return True
+            except (TypeError, ValueError):
+                continue
+    return False
+
+
+def instrument_player_orders(player_agents: dict[str, TradingAgent], exchange: ExchangeAgent) -> dict[str, set]:
+    submitted_order_ids = {player: set() for player in player_agents}
+
+    for player, agent in player_agents.items():
+        original_send_message = agent.sendMessage
+
+        def tracked_send_message(*args, _agent=agent, _player=player, _original=original_send_message, **kwargs):
+            recipient_id = args[0] if args else kwargs.get("recipientID", kwargs.get("recipient_id"))
+            msg = args[1] if len(args) > 1 else kwargs.get("msg")
+            body = getattr(msg, "body", {})
+            order = body.get("order") if body.get("msg") == "LIMIT_ORDER" else None
+            if recipient_id == exchange.id and getattr(order, "agent_id", None) == _agent.id:
+                submitted_order_ids[_player].add(getattr(order, "order_id", None))
+            return _original(*args, **kwargs)
+
+        agent.sendMessage = tracked_send_message
+
+    return submitted_order_ids
+
+
+def instrument_order_books(exchange: ExchangeAgent) -> dict[str, int]:
+    order_book_depth = {"count": 0}
+
+    for order_book in exchange.order_books.values():
+        original_handle_limit_order = order_book.handleLimitOrder
+
+        def tracked_handle_limit_order(*args, _original=original_handle_limit_order, **kwargs):
+            order_book_depth["count"] += 1
+            try:
+                return _original(*args, **kwargs)
+            finally:
+                order_book_depth["count"] -= 1
+
+        order_book.handleLimitOrder = tracked_handle_limit_order
+
+    return order_book_depth
+
+
 def guard_player_agent(agent: TradingAgent) -> TradingAgent:
     agent._codeclash_error = None
     agent._codeclash_traceback = None
@@ -203,6 +265,8 @@ def make_world_agents(agent_classes: dict[str, type], *, sim_idx: int, market_mi
         agent.log_to_file = False
 
     ledgers = {player: {"CASH": STARTING_CASH, SYMBOL: 0} for player in player_agents}
+    submitted_order_ids = instrument_player_orders(player_agents, exchange)
+    order_book_depth = instrument_order_books(exchange)
     original_exchange_send = exchange.sendMessage
 
     def scored_exchange_send(*args, **kwargs):
@@ -211,10 +275,16 @@ def make_world_agents(agent_classes: dict[str, type], *, sim_idx: int, market_mi
         player = player_ids.get(recipient_id)
         if player and getattr(msg, "body", {}).get("msg") == "ORDER_EXECUTED":
             order = msg.body["order"]
-            quantity = int(order.quantity)
-            signed_quantity = quantity if order.is_buy_order else -quantity
-            ledgers[player][SYMBOL] += signed_quantity
-            ledgers[player]["CASH"] -= signed_quantity * int(order.fill_price)
+            order_id = getattr(order, "order_id", None)
+            if (
+                order_book_depth["count"] > 0
+                and order_id in submitted_order_ids[player]
+                and is_recorded_execution(exchange, order)
+            ):
+                quantity = int(order.quantity)
+                signed_quantity = quantity if order.is_buy_order else -quantity
+                ledgers[player][SYMBOL] += signed_quantity
+                ledgers[player]["CASH"] -= signed_quantity * int(order.fill_price)
         return original_exchange_send(*args, **kwargs)
 
     exchange.sendMessage = scored_exchange_send
