@@ -71,27 +71,31 @@ damage opposing units, and score by survival, damage, kills, and block destructi
         if syntax_check["returncode"] != 0:
             return False, f"Python syntax error in `{self.submission}`:\n{syntax_check['output']}"
 
-        import_check = agent.environment.execute(
-            "python - <<'PY'\n"
-            "import importlib.util\n"
-            f"spec = importlib.util.spec_from_file_location('submission_agent', {self.submission!r})\n"
-            "module = importlib.util.module_from_spec(spec)\n"
-            "spec.loader.exec_module(module)\n"
-            "assert hasattr(module, 'next_actions'), 'next_actions callable not found'\n"
-            "assert callable(module.next_actions), 'next_actions must be callable'\n"
-            "state = {\n"
-            "    'connection': {'agent_id': 'Alice'},\n"
-            "    'agents': {'Alice': {'unit_ids': ['u0']}},\n"
-            "    'unit_state': {'u0': {'agent_id': 'Alice', 'hp': 3, 'coordinates': [1, 1]}},\n"
-            "    'entities': [],\n"
-            "    'world': {'width': 5, 'height': 5},\n"
-            "    'tick': 0,\n"
-            "}\n"
-            "result = module.next_actions(state)\n"
-            "assert result is None or isinstance(result, dict), 'next_actions must return a dict or None'\n"
-            "PY",
-            timeout=int(self._game_arg("validation_timeout")),
-        )
+        validation_timeout = int(self._game_arg("validation_timeout"))
+        try:
+            import_check = agent.environment.execute(
+                "python - <<'PY'\n"
+                "import importlib.util\n"
+                f"spec = importlib.util.spec_from_file_location('submission_agent', {self.submission!r})\n"
+                "module = importlib.util.module_from_spec(spec)\n"
+                "spec.loader.exec_module(module)\n"
+                "assert hasattr(module, 'next_actions'), 'next_actions callable not found'\n"
+                "assert callable(module.next_actions), 'next_actions must be callable'\n"
+                "state = {\n"
+                "    'connection': {'agent_id': 'Alice'},\n"
+                "    'agents': {'Alice': {'unit_ids': ['u0']}},\n"
+                "    'unit_state': {'u0': {'agent_id': 'Alice', 'hp': 3, 'coordinates': [1, 1]}},\n"
+                "    'entities': [],\n"
+                "    'world': {'width': 5, 'height': 5},\n"
+                "    'tick': 0,\n"
+                "}\n"
+                "result = module.next_actions(state)\n"
+                "assert result is None or isinstance(result, dict), 'next_actions must return a dict or None'\n"
+                "PY",
+                timeout=validation_timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return False, f"`next_actions` validation exceeded {validation_timeout}s timeout"
         if import_check["returncode"] != 0:
             return False, f"Could not import or call `next_actions` from `{self.submission}`:\n{import_check['output']}"
 
@@ -137,6 +141,17 @@ damage opposing units, and score by survival, damage, kills, and block destructi
             for agent in agents:
                 stats.scores[agent.name] = CRASH_SCORE
                 stats.player_stats[agent.name].score = CRASH_SCORE
+                stats.details.append(
+                    json.dumps(
+                        {
+                            "player": agent.name,
+                            "score": CRASH_SCORE,
+                            "status": "error",
+                            "error": f"missing Bomberland result file: {result_file}",
+                        },
+                        sort_keys=True,
+                    )
+                )
             return
 
         with open(result_file) as f:

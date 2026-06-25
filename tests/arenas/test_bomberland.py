@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import subprocess
 import time
 from pathlib import Path
 
@@ -119,6 +120,28 @@ class TestBomberlandValidation:
         assert error is None
         assert player.environment.timeouts[-1] == 9
 
+    def test_validation_timeout_invalidates_submission(self):
+        arena = BomberlandArena.__new__(BomberlandArena)
+        arena.submission = "bomberland_agent.py"
+        arena.config = {"game": {"name": "Bomberland", "args": {"validation_timeout": 3}}}
+
+        class TimeoutEnvironment(MockEnvironment):
+            def __init__(self):
+                super().__init__(
+                    files={"bomberland_agent.py": "def next_actions(game_state):\n    return {}\n"},
+                    command_outputs={"python -m py_compile bomberland_agent.py": {"output": "", "returncode": 0}},
+                )
+
+            def execute(self, cmd, cwd=None, timeout=None):
+                if cmd.startswith("python - <<'PY'"):
+                    raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
+                return super().execute(cmd, cwd=cwd, timeout=timeout)
+
+        valid, error = arena.validate_code(MockPlayer("Alice", TimeoutEnvironment()))
+
+        assert valid is False
+        assert error == "`next_actions` validation exceeded 3s timeout"
+
 
 class TestBomberlandResults:
     def test_parse_winner(self, tmp_log_dir):
@@ -177,6 +200,25 @@ class TestBomberlandResults:
 
         assert stats.winner == "Alice"
         assert stats.scores == {"Alice": -5.0, "Bob": CRASH_SCORE}
+
+    def test_missing_result_file_records_crash_details(self, tmp_log_dir):
+        arena = BomberlandArena.__new__(BomberlandArena)
+        arena.log_local = tmp_log_dir
+        arena.logger = type("Logger", (), {"error": lambda self, msg: None})()
+        (tmp_log_dir / "rounds" / "1").mkdir(parents=True)
+
+        agents = [MockPlayer("Alice"), MockPlayer("Bob")]
+        stats = RoundStats(round_num=1, agents=agents)
+
+        arena.get_results(agents, 1, stats)
+
+        assert stats.winner == RESULT_TIE
+        assert stats.scores == {"Alice": CRASH_SCORE, "Bob": CRASH_SCORE}
+        assert len(stats.details) == 2
+        detail = json.loads(stats.details[0])
+        assert detail["status"] == "error"
+        assert detail["score"] == CRASH_SCORE
+        assert "missing Bomberland result file" in detail["error"]
 
 
 class TestBomberlandExecution:
