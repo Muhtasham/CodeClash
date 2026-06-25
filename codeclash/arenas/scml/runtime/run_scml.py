@@ -35,7 +35,9 @@ def safe_module_name(player_name: str) -> str:
 
 def load_policy_module(player_name: str, path: str):
     agent_dir = str(Path(path).resolve().parent)
-    sys.path.insert(0, agent_dir)
+    inserted_agent_dir = agent_dir not in sys.path
+    if inserted_agent_dir:
+        sys.path.insert(0, agent_dir)
     module_name = f"codeclash_scml_{safe_class_name(player_name).lower()}"
     spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
@@ -44,7 +46,7 @@ def load_policy_module(player_name: str, path: str):
     try:
         spec.loader.exec_module(module)
     finally:
-        with contextlib.suppress(ValueError):
+        if inserted_agent_dir:
             sys.path.remove(agent_dir)
     if not hasattr(module, "decide") or not callable(module.decide):
         raise RuntimeError(f"{path} must define a callable decide(observation)")
@@ -178,18 +180,20 @@ def normalize_response(response) -> tuple[ResponseType | None, str | None]:
     return None, f"unknown response: {response}"
 
 
-def policy_worker(command_queue: mp.Queue, result_queue: mp.Queue, player_name: str, path: str) -> None:
+def policy_worker(
+    command_queue: mp.Queue, result_queue: mp.Queue, startup_queue: mp.Queue, player_name: str, path: str
+) -> None:
     try:
         module = load_policy_module(player_name, path)
     except BaseException as exc:
-        result_queue.put(
+        startup_queue.put(
             {
-                "request_id": None,
                 "error": f"{type(exc).__name__}: {exc}",
                 "traceback": traceback.format_exc(limit=5),
             }
         )
         return
+    startup_queue.put({"ready": True})
 
     while True:
         try:
@@ -223,17 +227,31 @@ class PolicyController:
         self.policy_errors = 0
         self.invalid_decisions = 0
         self.error_samples: list[dict[str, str]] = []
+        self.startup_error: str | None = None
         self._next_request_id = 0
         self._start_worker()
 
     def _start_worker(self) -> None:
+        self.startup_error = None
         ctx = mp.get_context("spawn")
         self.command_queue = ctx.Queue()
         self.result_queue = ctx.Queue()
+        self.startup_queue = ctx.Queue()
         self.process = ctx.Process(
-            target=policy_worker, args=(self.command_queue, self.result_queue, self.player_name, self.path)
+            target=policy_worker,
+            args=(self.command_queue, self.result_queue, self.startup_queue, self.player_name, self.path),
         )
         self.process.start()
+        startup_timeout = max(self.timeout, 10.0)
+        try:
+            startup_message = self.startup_queue.get(timeout=startup_timeout)
+        except queue.Empty:
+            self.startup_error = f"policy import exceeded {startup_timeout}s timeout"
+            self.close()
+            return
+        if "error" in startup_message:
+            self.startup_error = startup_message["error"]
+            self.close()
 
     def _record_error(self, event: str, error: str, *, invalid: bool = False) -> None:
         self.policy_errors += 1
@@ -264,6 +282,11 @@ class PolicyController:
         if self.disabled:
             return {}
         event = str(observation.get("event", "unknown"))
+        if self.startup_error is not None:
+            self._record_error(event, self.startup_error)
+            if not self.disabled:
+                self.restart()
+            return {}
         request_id = self._next_request_id
         self._next_request_id += 1
         self.command_queue.put({"request_id": request_id, "observation": observation})
