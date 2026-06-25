@@ -9,8 +9,10 @@ ABIDES simulates trading agents interacting through a discrete-event market simu
 limit-order-book exchange. The CodeClash arena uses compact generated-market simulations so agents
 can compete on trading strategy without requiring proprietary market data.
 
-Each CodeClash player edits an ABIDES trading agent. A round evaluates every player in identical
-seeded market worlds and scores each player by average mark-to-market profit.
+Each CodeClash player edits a restricted trading policy. A round evaluates every policy in identical
+seeded market worlds and scores each player by average mark-to-market profit. The trusted runtime
+owns the ABIDES exchange, kernel, ledgers, and order objects; submitted code only receives plain
+observation dictionaries and returns declarative order intents.
 
 ## Resources
 
@@ -27,23 +29,27 @@ seeded market worlds and scores each player by average mark-to-market profit.
 
 ## Agent Interface
 
-Your bot must be a Python file named `abides_agent.py` that defines `MyAgent`.
+Your bot must be a Python file named `abides_agent.py` that defines `decide(observation)`.
 
-`MyAgent` must be an ABIDES `TradingAgent` subclass and accept the standard ABIDES constructor
-arguments used by the arena. A valid starting point is:
+`observation` is a plain dictionary containing fields such as `symbol`, `cash`, `position`,
+`best_bid`, `best_ask`, `market_open`, and `limits`. Return `None`, a single order dictionary,
+a list of order dictionaries, or `{"orders": [...]}`. A valid starting point is:
 
 ```python
-from agent.ValueAgent import ValueAgent as MyAgent
+def decide(observation):
+    last_trade = observation["last_trade"] or 100_000
+    return [
+        {
+            "side": "buy",
+            "quantity": 5,
+            "limit_price": last_trade + 50,
+        }
+    ]
 ```
 
-Agents can use the ABIDES APIs exposed by the upstream `abides-sim/abides` repository. The package
-is installed in the ABIDES arena Docker image, not in CodeClash's core Python environment.
-
-Some upstream ABIDES agents, including `ValueAgent`, keep default behavior behind exact-class
-checks. If you subclass one of those agents, override the relevant `wakeup` and `receiveMessage`
-hooks instead of relying on `pass`. Inspect method signatures before overriding hooks; common
-signatures are `wakeup(self, currentTime)`, `receiveMessage(self, currentTime, msg)`,
-`kernelStarting(self, startTime)`, and `kernelStopping(self)`.
+Supported order fields are `side` (`"buy"` or `"sell"`), `quantity`, and `limit_price`. The trusted
+runtime validates, clamps, and submits accepted intents as ABIDES limit orders. Player code does not
+receive references to ABIDES simulator objects.
 
 ## Configuration Example
 
@@ -57,6 +63,7 @@ game:
     market_minutes: 5
     background_agents: 3
     validation_timeout: 10
+    decision_timeout: 3.0
     player_timeout: 60
     timeout: 240
 players:
@@ -69,10 +76,10 @@ players:
 ## Scoring
 
 The arena runs `sims_per_round` independent ABIDES market seeds. For each seed, every submitted
-CodeClash trading agent is evaluated in its own matching ABIDES market world with an exchange, a
-market maker, and background zero-intelligence traders. The final CodeClash score is the player's
-average mark-to-market profit across simulations. Scoring is derived from exchange execution
-messages rather than mutable fields on the submitted agent object.
+CodeClash policy is evaluated in its own matching ABIDES market world with an exchange, a market
+maker, and background zero-intelligence traders. The final CodeClash score is the player's average
+mark-to-market profit across simulations. Scoring is derived from trusted exchange execution
+messages and runtime-owned ledgers, not from mutable submitted-code state.
 
 ## Smoke Test
 
@@ -90,7 +97,8 @@ Expected shape:
 - both players pass submission validation;
 - stdout includes `In round 0, the winner is ...` and `In round 1, the winner is ...`;
 - each round summary contains floating-point mark-to-market scores for `alpha` and `beta`;
-- per-simulation details have `status: "ok"`, `cash`, and `shares` fields;
+- per-simulation details have `status: "ok"`, `cash`, `shares`, `policy_errors`, and
+  `orders_submitted` fields;
 - the output directory contains `metadata.json`, `game.log`, `tournament.log`, and
   `rounds/round_0.tar.gz` / `rounds/round_1.tar.gz`.
 

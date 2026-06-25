@@ -7,6 +7,7 @@ game:
     market_minutes: 5
     background_agents: 3
     validation_timeout: 10
+    decision_timeout: 3.0
     player_timeout: 60
     timeout: 240
 players:
@@ -24,13 +25,16 @@ prompts:
     Your task: improve `abides_agent.py`, located in {{working_dir}}.
     All commands run from {{working_dir}}.
 
-    Your file must define `MyAgent`, an ABIDES TradingAgent subclass. A valid starting point is:
+    Your file must define `decide(observation)`. The arena passes a plain observation dictionary
+    and expects a list of declarative limit-order intents. A valid starting point is:
 
-    from agent.ValueAgent import ValueAgent as MyAgent
+    def decide(observation):
+        last_trade = observation["last_trade"] or 100000
+        return [{"side": "buy", "quantity": 5, "limit_price": last_trade + 50}]
 
-    If you subclass an upstream ABIDES agent, inspect and match ABIDES method signatures exactly.
-    Common hooks are `wakeup(self, currentTime)`, `receiveMessage(self, currentTime, msg)`,
-    `kernelStarting(self, startTime)`, and `kernelStopping(self)`.
+    Supported order fields are `side` ("buy" or "sell"), `quantity`, and `limit_price`.
+    The trusted runtime owns the ABIDES exchange, ledgers, and order objects; your code only
+    returns order intents.
 
     The arena runs compact ABIDES market simulations. Your objective is to maximize average
     mark-to-market profit across identical seeded market worlds.

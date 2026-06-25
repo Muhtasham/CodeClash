@@ -15,11 +15,11 @@ class TestABIDESValidation:
         arena.config = {"game": {"args": {"validation_timeout": 3}}}
         player = mock_player_factory(
             name="Alice",
-            files={"abides_agent.py": "from agent.ValueAgent import ValueAgent as MyAgent\n"},
+            files={"abides_agent.py": "def decide(observation):\n    return []\n"},
             command_outputs={
                 "test -f abides_agent.py && echo exists": {"output": "exists\n", "returncode": 0},
                 "cat abides_agent.py": {
-                    "output": "from agent.ValueAgent import ValueAgent as MyAgent\n",
+                    "output": "def decide(observation):\n    return []\n",
                     "returncode": 0,
                 },
                 "python -m py_compile abides_agent.py": {"output": "", "returncode": 0},
@@ -32,9 +32,8 @@ class TestABIDESValidation:
         assert valid is True
         assert error is None
         import_command = next(cmd for cmd in player.environment._executed_commands if cmd.startswith("python - <<'PY'"))
-        assert import_command.index("from agent.TradingAgent import TradingAgent") < import_command.index(
-            "spec.loader.exec_module(module)"
-        )
+        assert "module.decide(observation)" in import_command
+        assert "TradingAgent" not in import_command
 
     def test_validation_import_uses_timeout(self, mock_player_factory):
         arena = ABIDESArena.__new__(ABIDESArena)
@@ -44,7 +43,7 @@ class TestABIDESValidation:
         class CapturingEnvironment(MockEnvironment):
             def __init__(self):
                 super().__init__(
-                    files={"abides_agent.py": "from agent.ValueAgent import ValueAgent as MyAgent\n"},
+                    files={"abides_agent.py": "def decide(observation):\n    return []\n"},
                     command_outputs={
                         "python -m py_compile abides_agent.py": {"output": "", "returncode": 0},
                         "python - <<'PY'": {"output": "", "returncode": 0},
@@ -67,7 +66,7 @@ class TestABIDESValidation:
         )
         assert import_timeout == 7
 
-    def test_missing_myagent(self, mock_player_factory):
+    def test_missing_decide(self, mock_player_factory):
         arena = ABIDESArena.__new__(ABIDESArena)
         arena.submission = "abides_agent.py"
         arena.config = {"game": {}}
@@ -78,14 +77,14 @@ class TestABIDESValidation:
                 "test -f abides_agent.py && echo exists": {"output": "exists\n", "returncode": 0},
                 "cat abides_agent.py": {"output": "class OtherAgent:\n    pass\n", "returncode": 0},
                 "python -m py_compile abides_agent.py": {"output": "", "returncode": 0},
-                "python - <<'PY'": {"output": "MyAgent class not found", "returncode": 1},
+                "python - <<'PY'": {"output": "decide function not found", "returncode": 1},
             },
         )
 
         valid, error = arena.validate_code(player)
 
         assert valid is False
-        assert "Could not import and instantiate" in error
+        assert "Could not import or call" in error
 
     def test_import_failure(self, mock_player_factory):
         arena = ABIDESArena.__new__(ABIDESArena)
@@ -93,10 +92,13 @@ class TestABIDESValidation:
         arena.config = {"game": {}}
         player = mock_player_factory(
             name="Alice",
-            files={"abides_agent.py": "class MyAgent:\n    pass\n"},
+            files={"abides_agent.py": "def decide(observation):\n    raise ImportError('boom')\n"},
             command_outputs={
                 "test -f abides_agent.py && echo exists": {"output": "exists\n", "returncode": 0},
-                "cat abides_agent.py": {"output": "class MyAgent:\n    pass\n", "returncode": 0},
+                "cat abides_agent.py": {
+                    "output": "def decide(observation):\n    raise ImportError('boom')\n",
+                    "returncode": 0,
+                },
                 "python -m py_compile abides_agent.py": {"output": "", "returncode": 0},
                 "python - <<'PY'": {"output": "ImportError", "returncode": 1},
             },
@@ -105,7 +107,7 @@ class TestABIDESValidation:
         valid, error = arena.validate_code(player)
 
         assert valid is False
-        assert "Could not import and instantiate" in error
+        assert "Could not import or call" in error
 
 
 class TestABIDESResults:
@@ -195,6 +197,7 @@ class TestABIDESExecution:
                 "args": {
                     "market_minutes": 11,
                     "background_agents": 13,
+                    "decision_timeout": 2.5,
                     "player_timeout": 19,
                     "timeout": 17,
                 },
@@ -221,6 +224,7 @@ class TestABIDESExecution:
         assert "--sims 5" in cmd
         assert "--market-minutes 11" in cmd
         assert "--background-agents 13" in cmd
+        assert "--decision-timeout 2.5" in cmd
         assert "--player-timeout 19" in cmd
         assert "--output /logs/abides_results.json" in cmd
         assert "--agent Alice=/Alice/abides_agent.py" in cmd

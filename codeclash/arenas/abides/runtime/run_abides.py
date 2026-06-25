@@ -27,13 +27,12 @@ CRASH_SCORE = -1_000_000.0
 SYMBOL = "JPM"
 STARTING_CASH = 10_000_000
 PLAYER_LAMBDA_A = 7e-11
-GUARDED_METHOD_DEFAULTS = {
-    "kernelInitializing": None,
-    "kernelStarting": None,
-    "kernelStopping": None,
-    "wakeup": False,
-    "receiveMessage": None,
-}
+MAX_ORDERS_PER_WAKEUP = 2
+MAX_ORDER_QUANTITY = 20
+MAX_ABS_POSITION = 200
+MIN_LIMIT_PRICE = 1
+MAX_LIMIT_PRICE = 1_000_000
+WAKEUP_INTERVAL = "30s"
 
 
 def safe_module_name(player_name: str, sim_idx: int | None = None) -> str:
@@ -44,7 +43,7 @@ def safe_module_name(player_name: str, sim_idx: int | None = None) -> str:
     return f"codeclash_abides_{safe.lower()}{suffix}"
 
 
-def load_agent_class(player_name: str, path: str, *, sim_idx: int | None = None):
+def load_policy_module(player_name: str, path: str, *, sim_idx: int | None = None):
     agent_dir = str(Path(path).resolve().parent)
     sys.path.insert(0, agent_dir)
     spec = importlib.util.spec_from_file_location(safe_module_name(player_name, sim_idx), path)
@@ -56,31 +55,196 @@ def load_agent_class(player_name: str, path: str, *, sim_idx: int | None = None)
     finally:
         with contextlib.suppress(ValueError):
             sys.path.remove(agent_dir)
-    if not hasattr(module, "MyAgent"):
-        raise RuntimeError(f"{path} does not define MyAgent")
-    agent_class = module.MyAgent
-    if not issubclass(agent_class, TradingAgent):
-        raise RuntimeError(f"{path} MyAgent must inherit from ABIDES TradingAgent")
-    return agent_class
+    if not hasattr(module, "decide") or not callable(module.decide):
+        raise RuntimeError(f"{path} must define a callable decide(observation)")
+    return module
+
+
+def policy_worker(result_queue: mp.Queue, player: str, path: str, observation: dict, sim_idx: int) -> None:
+    try:
+        module = load_policy_module(player, path, sim_idx=sim_idx)
+        result_queue.put({"orders": module.decide(observation)})
+    except BaseException as exc:
+        result_queue.put(
+            {
+                "error": f"{type(exc).__name__}: {exc}",
+                "traceback": traceback.format_exc(limit=5),
+            }
+        )
+
+
+def call_policy(
+    player: str, path: str, observation: dict, *, sim_idx: int, timeout: float
+) -> tuple[object, dict | None]:
+    ctx = mp.get_context("spawn")
+    result_queue = ctx.Queue(maxsize=1)
+    process = ctx.Process(target=policy_worker, args=(result_queue, player, path, observation, sim_idx))
+    process.start()
+    process.join(max(float(timeout), 0.01))
+    if process.is_alive():
+        process.terminate()
+        process.join(0.1)
+        if process.is_alive():
+            process.kill()
+            process.join()
+        return None, {"error": f"decide exceeded {timeout}s timeout"}
+
+    try:
+        result = result_queue.get_nowait()
+    except queue.Empty:
+        return None, {"error": f"decide exited with code {process.exitcode} and no result"}
+
+    if "error" in result:
+        return None, result
+    return result.get("orders"), None
 
 
 def make_random_state() -> np.random.RandomState:
     return np.random.RandomState(seed=np.random.randint(low=0, high=2**32, dtype="uint64"))
 
 
-def make_player_agent(agent_class: type, player_name: str, agent_id: int):
-    agent = agent_class(
-        id=agent_id,
-        name=player_name,
-        type=f"PLAYER:{player_name}",
-        symbol=SYMBOL,
-        starting_cash=STARTING_CASH,
-        log_orders=False,
-        random_state=make_random_state(),
-    )
-    if hasattr(agent, "lambda_a"):
-        agent.lambda_a = min(float(agent.lambda_a), PLAYER_LAMBDA_A)
-    return guard_player_agent(agent)
+def normalize_order_intents(raw_orders) -> list[dict]:
+    if raw_orders is None:
+        return []
+    if isinstance(raw_orders, dict):
+        if "orders" in raw_orders:
+            raw_orders = raw_orders["orders"]
+        else:
+            raw_orders = [raw_orders]
+    if not isinstance(raw_orders, (list, tuple)):
+        raise ValueError("decide must return an order dict, an order list, {'orders': [...]}, or None")
+
+    normalized = []
+    for raw_order in raw_orders[:MAX_ORDERS_PER_WAKEUP]:
+        if not isinstance(raw_order, dict):
+            raise ValueError("each order intent must be a dict")
+
+        side = str(raw_order.get("side", "")).lower().strip()
+        if side not in {"buy", "sell"}:
+            raise ValueError("order side must be 'buy' or 'sell'")
+
+        quantity = min(max(int(raw_order.get("quantity", 0)), 1), MAX_ORDER_QUANTITY)
+        limit_price = min(
+            max(int(raw_order.get("limit_price", raw_order.get("price", 0))), MIN_LIMIT_PRICE), MAX_LIMIT_PRICE
+        )
+        normalized.append(
+            {
+                "side": side,
+                "quantity": quantity,
+                "limit_price": limit_price,
+            }
+        )
+
+    return normalized
+
+
+class ProtocolTradingAgent(TradingAgent):
+    def __init__(
+        self,
+        *,
+        policy_path: str,
+        decision_timeout: float,
+        sim_idx: int,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.policy_path = policy_path
+        self.decision_timeout = decision_timeout
+        self.sim_idx = sim_idx
+        self.policy_errors: list[dict] = []
+        self.orders_submitted = 0
+        self.lambda_a = PLAYER_LAMBDA_A
+        self.codeclash_exchange: ExchangeAgent | None = None
+
+    def getWakeFrequency(self):
+        return pd.to_timedelta(WAKEUP_INTERVAL)
+
+    def receiveMessage(self, currentTime, msg):
+        try:
+            super().receiveMessage(currentTime, msg)
+        except Exception as exc:
+            self.policy_errors.append({"error": f"{type(exc).__name__} in receiveMessage: {exc}"})
+
+    def wakeup(self, currentTime):
+        ready_to_trade = super().wakeup(currentTime)
+        if not ready_to_trade:
+            return ready_to_trade
+
+        self.getCurrentSpread(SYMBOL)
+        observation = self.build_observation(currentTime)
+        raw_orders, error = call_policy(
+            self.name,
+            self.policy_path,
+            observation,
+            sim_idx=self.sim_idx,
+            timeout=self.decision_timeout,
+        )
+        if error:
+            self.policy_errors.append(error)
+        else:
+            try:
+                self.submit_order_intents(normalize_order_intents(raw_orders))
+            except Exception as exc:
+                self.policy_errors.append(
+                    {
+                        "error": f"{type(exc).__name__} while validating order intents: {exc}",
+                        "traceback": traceback.format_exc(limit=5),
+                    }
+                )
+
+        next_wakeup = currentTime + pd.to_timedelta(WAKEUP_INTERVAL)
+        if self.mkt_close is None or next_wakeup < self.mkt_close:
+            self.setWakeup(next_wakeup)
+        return ready_to_trade
+
+    def build_observation(self, currentTime) -> dict:
+        try:
+            bid, bid_volume, ask, ask_volume = self.getKnownBidAsk(SYMBOL)
+        except KeyError:
+            bid, bid_volume, ask, ask_volume = None, 0, None, 0
+        last_trade = None
+        if self.codeclash_exchange is not None:
+            with contextlib.suppress(Exception):
+                last_trade = int(self.codeclash_exchange.order_books[SYMBOL].last_trade)
+        return {
+            "player": self.name,
+            "symbol": SYMBOL,
+            "time": str(currentTime),
+            "cash": int(self.holdings.get("CASH", STARTING_CASH)),
+            "position": int(self.holdings.get(SYMBOL, 0)),
+            "starting_cash": STARTING_CASH,
+            "best_bid": None if bid is None else int(bid),
+            "best_bid_volume": int(bid_volume or 0),
+            "best_ask": None if ask is None else int(ask),
+            "best_ask_volume": int(ask_volume or 0),
+            "last_trade": last_trade,
+            "market_open": self.mkt_open is not None and self.mkt_close is not None and currentTime < self.mkt_close,
+            "limits": {
+                "max_orders": MAX_ORDERS_PER_WAKEUP,
+                "max_order_quantity": MAX_ORDER_QUANTITY,
+                "max_abs_position": MAX_ABS_POSITION,
+                "min_limit_price": MIN_LIMIT_PRICE,
+                "max_limit_price": MAX_LIMIT_PRICE,
+            },
+        }
+
+    def submit_order_intents(self, orders: list[dict]) -> None:
+        position = int(self.holdings.get(SYMBOL, 0))
+        for order in orders:
+            signed_quantity = order["quantity"] if order["side"] == "buy" else -order["quantity"]
+            if abs(position + signed_quantity) > MAX_ABS_POSITION:
+                self.policy_errors.append({"error": "order skipped because it would exceed max_abs_position"})
+                continue
+            self.placeLimitOrder(
+                SYMBOL,
+                order["quantity"],
+                order["side"] == "buy",
+                order["limit_price"],
+                ignore_risk=True,
+                tag="codeclash-protocol",
+            )
+            position += signed_quantity
+            self.orders_submitted += 1
 
 
 def is_recorded_execution(exchange: ExchangeAgent, order) -> bool:
@@ -145,31 +309,14 @@ def instrument_order_books(exchange: ExchangeAgent) -> dict[str, int]:
     return order_book_depth
 
 
-def guard_player_agent(agent: TradingAgent) -> TradingAgent:
-    agent._codeclash_error = None
-    agent._codeclash_traceback = None
-
-    for method_name, fallback in GUARDED_METHOD_DEFAULTS.items():
-        original = getattr(agent, method_name, None)
-        if original is None:
-            continue
-
-        def guarded(*args, _original=original, _method_name=method_name, _fallback=fallback, **kwargs):
-            if getattr(agent, "_codeclash_error", None):
-                return _fallback
-            try:
-                return _original(*args, **kwargs)
-            except Exception as exc:
-                agent._codeclash_error = f"{type(exc).__name__} in {_method_name}: {exc}"
-                agent._codeclash_traceback = traceback.format_exc(limit=5)
-                return _fallback
-
-        setattr(agent, method_name, guarded)
-
-    return agent
-
-
-def make_world_agents(agent_classes: dict[str, type], *, sim_idx: int, market_minutes: int, background_agents: int):
+def make_world_agents(
+    policy_paths: dict[str, str],
+    *,
+    sim_idx: int,
+    market_minutes: int,
+    background_agents: int,
+    decision_timeout: float,
+):
     historical_date = pd.to_datetime("2019-06-28")
     mkt_open = historical_date + pd.to_timedelta("09:30:00")
     mkt_close = mkt_open + pd.to_timedelta(market_minutes, unit="m")
@@ -250,12 +397,23 @@ def make_world_agents(agent_classes: dict[str, type], *, sim_idx: int, market_mi
 
     player_agents = {}
     player_ids = {}
-    player_names = list(agent_classes.keys())
+    player_names = list(policy_paths.keys())
     if player_names:
         offset = sim_idx % len(player_names)
         ordered_names = player_names[offset:] + player_names[:offset]
         for player_name in ordered_names:
-            agent = make_player_agent(agent_classes[player_name], player_name, agent_id)
+            agent = ProtocolTradingAgent(
+                id=agent_id,
+                name=player_name,
+                type=f"PLAYER:{player_name}",
+                policy_path=policy_paths[player_name],
+                decision_timeout=decision_timeout,
+                sim_idx=sim_idx,
+                starting_cash=STARTING_CASH,
+                log_orders=False,
+                random_state=make_random_state(),
+            )
+            agent.codeclash_exchange = exchange
             agents.append(agent)
             player_agents[player_name] = agent
             player_ids[agent_id] = player_name
@@ -300,14 +458,7 @@ def make_world_agents(agent_classes: dict[str, type], *, sim_idx: int, market_mi
     }
 
 
-def score_player(agent: TradingAgent, ledger: dict[str, int], final_price: int) -> tuple[float, dict]:
-    if getattr(agent, "_codeclash_error", None):
-        return CRASH_SCORE, {
-            "status": "error",
-            "error": agent._codeclash_error,
-            "traceback": agent._codeclash_traceback,
-        }
-
+def score_player(agent: ProtocolTradingAgent, ledger: dict[str, int], final_price: int) -> tuple[float, dict]:
     try:
         cash = int(ledger.get("CASH", 0))
         shares = int(ledger.get(SYMBOL, 0))
@@ -319,16 +470,24 @@ def score_player(agent: TradingAgent, ledger: dict[str, int], final_price: int) 
             "traceback": traceback.format_exc(limit=5),
         }
 
-    return score, {"status": "ok", "cash": cash, "shares": shares}
+    return score, {
+        "status": "ok",
+        "cash": cash,
+        "shares": shares,
+        "policy_errors": len(agent.policy_errors),
+        "policy_error_samples": agent.policy_errors[:3],
+        "orders_submitted": agent.orders_submitted,
+    }
 
 
 def run_player_market(
     player: str,
-    agent_class: type,
+    path: str,
     *,
     sim_idx: int,
     market_minutes: int,
     background_agents: int,
+    decision_timeout: float,
 ) -> dict:
     seed = 9200 + sim_idx
     random.seed(seed)
@@ -337,10 +496,11 @@ def run_player_market(
     LimitOrder.silent_mode = True
 
     world = make_world_agents(
-        {player: agent_class},
+        {player: path},
         sim_idx=sim_idx,
         market_minutes=market_minutes,
         background_agents=background_agents,
+        decision_timeout=decision_timeout,
     )
     kernel = Kernel("CodeClash ABIDES Kernel", random_state=make_random_state())
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -380,12 +540,17 @@ def run_player_market_worker(
     sim_idx: int,
     market_minutes: int,
     background_agents: int,
+    decision_timeout: float,
 ) -> None:
     try:
-        agent_class = load_agent_class(player, path, sim_idx=sim_idx)
         result_queue.put(
             run_player_market(
-                player, agent_class, sim_idx=sim_idx, market_minutes=market_minutes, background_agents=background_agents
+                player,
+                path,
+                sim_idx=sim_idx,
+                market_minutes=market_minutes,
+                background_agents=background_agents,
+                decision_timeout=decision_timeout,
             )
         )
     except BaseException as exc:
@@ -411,6 +576,7 @@ def run_player_market_isolated(
     sim_idx: int,
     market_minutes: int,
     background_agents: int,
+    decision_timeout: float,
     player_timeout: int,
 ) -> dict:
     ctx = mp.get_context("spawn")
@@ -422,6 +588,7 @@ def run_player_market_isolated(
             "sim_idx": sim_idx,
             "market_minutes": market_minutes,
             "background_agents": background_agents,
+            "decision_timeout": decision_timeout,
         },
     )
     process.start()
@@ -459,7 +626,13 @@ def run_player_market_isolated(
 
 
 def run_market(
-    agent_paths: dict[str, str], *, sim_idx: int, market_minutes: int, background_agents: int, player_timeout: int
+    agent_paths: dict[str, str],
+    *,
+    sim_idx: int,
+    market_minutes: int,
+    background_agents: int,
+    decision_timeout: float,
+    player_timeout: int,
 ) -> dict:
     scores = {}
     details = []
@@ -470,6 +643,7 @@ def run_market(
             sim_idx=sim_idx,
             market_minutes=market_minutes,
             background_agents=background_agents,
+            decision_timeout=decision_timeout,
             player_timeout=player_timeout,
         )
         scores[player] = result["score"]
@@ -495,6 +669,7 @@ def main() -> None:
     parser.add_argument("--sims", type=int, default=3)
     parser.add_argument("--market-minutes", type=int, default=5)
     parser.add_argument("--background-agents", type=int, default=3)
+    parser.add_argument("--decision-timeout", type=float, default=3.0)
     parser.add_argument("--player-timeout", type=int, default=60)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
@@ -505,6 +680,8 @@ def main() -> None:
         parser.error("--market-minutes must be at least 1")
     if args.background_agents < 0:
         parser.error("--background-agents cannot be negative")
+    if args.decision_timeout <= 0:
+        parser.error("--decision-timeout must be positive")
     if args.player_timeout < 1:
         parser.error("--player-timeout must be at least 1")
 
@@ -523,6 +700,7 @@ def main() -> None:
                 sim_idx=sim_idx,
                 market_minutes=args.market_minutes,
                 background_agents=args.background_agents,
+                decision_timeout=args.decision_timeout,
                 player_timeout=args.player_timeout,
             )
         except Exception as exc:

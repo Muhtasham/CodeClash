@@ -16,20 +16,24 @@ class ABIDESArena(CodeArena):
     submission: str = "abides_agent.py"
     description: str = """ABIDES is an agent-based market simulator for financial-market research.
 
-Your bot is a Python file named `abides_agent.py` that defines a class named `MyAgent`.
-`MyAgent` should be an ABIDES trading agent class, for example:
+Your bot is a Python file named `abides_agent.py` that defines a function named `decide`.
+The function receives a plain observation dictionary and returns a list of order intents:
 
-    from agent.ValueAgent import ValueAgent as MyAgent
+    def decide(observation):
+        return [{"side": "buy", "quantity": 5, "limit_price": 100000}]
 
-Each round runs several compact ABIDES market simulations. Every submitted agent is evaluated in
-identical seeded market worlds with the same exchange, market maker, and background traders. The
-objective is to maximize average mark-to-market profit across all simulations in the round.
+The trusted arena runtime owns the ABIDES exchange, kernel, ledgers, and order objects. Submitted
+code only returns declarative order intents. Each round runs several compact ABIDES market
+simulations. Every submitted policy is evaluated in identical seeded market worlds with the same
+exchange, market maker, and background traders. The objective is to maximize average mark-to-market
+profit across all simulations in the round.
 """
     default_args: dict = {
         "sims_per_round": 3,
         "market_minutes": 5,
         "background_agents": 3,
         "validation_timeout": 10,
+        "decision_timeout": 3.0,
         "player_timeout": 60,
         "timeout": 240,
     }
@@ -54,29 +58,29 @@ objective is to maximize average mark-to-market profit across all simulations in
         import_check = agent.environment.execute(
             "python - <<'PY'\n"
             "import importlib.util\n"
-            "import numpy as np\n"
-            "from agent.TradingAgent import TradingAgent\n"
             f"spec = importlib.util.spec_from_file_location('submission_agent', {self.submission!r})\n"
             "module = importlib.util.module_from_spec(spec)\n"
             "spec.loader.exec_module(module)\n"
-            "assert hasattr(module, 'MyAgent'), 'MyAgent class not found'\n"
-            "assert issubclass(module.MyAgent, TradingAgent), 'MyAgent must inherit from an ABIDES TradingAgent class'\n"
-            "module.MyAgent(\n"
-            "    id=1,\n"
-            "    name='validation',\n"
-            "    type='ValidationAgent',\n"
-            "    symbol='JPM',\n"
-            "    starting_cash=10000000,\n"
-            "    log_orders=False,\n"
-            "    random_state=np.random.RandomState(seed=1),\n"
-            ")\n"
+            "assert hasattr(module, 'decide'), 'decide function not found'\n"
+            "assert callable(module.decide), 'decide must be callable'\n"
+            "observation = {\n"
+            "    'symbol': 'JPM',\n"
+            "    'cash': 10000000,\n"
+            "    'position': 0,\n"
+            "    'best_bid': None,\n"
+            "    'best_ask': None,\n"
+            "    'last_trade': 100000,\n"
+            "    'market_open': True,\n"
+            "}\n"
+            "result = module.decide(observation)\n"
+            "assert result is None or isinstance(result, (list, tuple, dict)), 'decide must return a list, tuple, dict, or None'\n"
             "PY",
             timeout=int(self._game_arg("validation_timeout")),
         )
         if import_check["returncode"] != 0:
             return (
                 False,
-                f"Could not import and instantiate `MyAgent` from `{self.submission}`:\n{import_check['output']}",
+                f"Could not import or call `decide` from `{self.submission}`:\n{import_check['output']}",
             )
 
         return True, None
@@ -95,6 +99,8 @@ objective is to maximize average mark-to-market profit across all simulations in
             str(self._game_arg("market_minutes")),
             "--background-agents",
             str(self._game_arg("background_agents")),
+            "--decision-timeout",
+            str(self._game_arg("decision_timeout")),
             "--player-timeout",
             str(self._game_arg("player_timeout")),
             "--output",
