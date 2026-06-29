@@ -68,6 +68,10 @@ def normalize_action(action, action_space) -> tuple[int, str | None]:
         return DEFAULT_ACTION, None
     if isinstance(action, np.generic):
         action = action.item()
+    if isinstance(action, bool):
+        return DEFAULT_ACTION, "action must be an integer"
+    if isinstance(action, float) and action.is_integer():
+        action = int(action)
     if not isinstance(action, int):
         return DEFAULT_ACTION, "action must be an integer"
     if n is not None and not 0 <= action < int(n):
